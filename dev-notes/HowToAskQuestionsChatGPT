@@ -1,0 +1,72 @@
+Context:
+Next.js + Supabase app, multi-tenant setup
+
+Goal:
+Apply role-based filtering to products
+
+Current Code:
+const fetchProducts = async () => {
+  let req = supabase.from('Products').select('*');
+  req = applyRoleFilter(req, user);
+  const { data } = await req;
+};
+
+Issue:
+Getting empty data for branch_user
+
+Expected Behavior:
+Branch user should see only their branch products
+
+What I Tried:
+- Checked user context (branch_id is correct)
+- Data exists in DB
+
+==============================================================================
+
+FOR UI BUGS
+
+Context:
+React component
+
+Goal:
+Button click not working
+
+Code:
+[paste JSX]
+
+Issue:
+Click not firing, no console log
+
+==============================================================================
+FOR SUPABASE/DB 
+
+Context:
+Supabase query
+
+Goal:
+Fetch user by auth_user_id
+
+Query:
+[paste code]
+
+Error:
+[paste error]
+
+DB Schema:
+(optional but powerful)
+
+==================================================================================
+FOR ARCHITECTURE QUESTIONS
+
+Context:
+Multi-tenant SaaS
+
+Goal:
+Design user permissions
+
+Constraints:
+- Roles: admin, branch_user, super_user
+- Groups + permissions needed
+
+Question:
+How should this be structured?
