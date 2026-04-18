@@ -1,0 +1,11 @@
+What is implemented
+
+Access permissions
+1. Table structure created USer->role->group->permissions
+2. 
+
+To Do
+
+Test UI with data.
+Implement along with GPT, the user access permission code refactor. 
+

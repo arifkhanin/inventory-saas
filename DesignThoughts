@@ -1,0 +1,34 @@
+There are a couple of things that need to be done
+1. In add product - 
+	a. Once a product is saved the page should refresh. SAved entries should not be visible
+	b. The page should give ability to add rows to enter more products and then bulk save multiple rows
+	c. Ability to upload an excel(csv) with data which then is seen on the add products grid and can be bulk saved
+	d. Ability to upload an image of a handwritten product and other details, which is read via ocr and seen as rows on add product page to bulk save. This is a nice to have.
+	e. Pagination
+	
+2. Have a Customer table that holds name, id, address, contact name, phone, gst number, PAN number. This id should be referenced in invoice table.
+	a. Add customer page
+	b. Upload csv to add customers
+	c. Upload image of handwritten customer details, which is then viewed on add customer page and then saved
+	d. Update customer page
+	e. Delete customer page
+	
+3. RecordSales page
+	a. Grid to record multiple sales to a customer
+	b. Ability to select existing customer from a drop down or if new customer, then enter name of customer which gets saved in Customer table. Other details can be updated later.
+	
+4. Restock page
+	a. Grid to enter and save multiple records in a go.
+
+5. General UIX
+	a. The UI is pretty rudimentary. We need a very professional UIX. You are a UI engineer with 10+ years of experience. Can you work on providing
+	a UIX on this product that is similar to shopify or zoho.
+	b. The side bar is at the top right now, not on the side.
+
+6. The system is tightly coupled with supabase. Can we modularize it so that supabase can be replaced with any database which we find cost-effective at that point in time	.
+
+The whole user access permission design needs to be looked at. 
+1. A user can have different pre-defined roles {admin, branch (can view only branch level data), super-user (can view multi-branch data)}
+2. The user then belongs to groups. A group can perform only those functions that are configured for the group. Eg. (view, add, delete, update). Need to figure out how various departments in an org. fit in.
+3. Group should be able to access only those reports taht are configured for it.
+4. Any suggestions. LEts nail the design then refactor the code.

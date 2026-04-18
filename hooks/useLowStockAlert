@@ -1,0 +1,11 @@
+import { useEffect } from 'react';
+import { Product } from '../types/product';
+
+export const useLowStockAlert = (products: Product[]) => {
+  useEffect(() => {
+    const lowStock = products.filter(p => p.stock < 5);
+    if (lowStock.length > 0) {
+      alert(`Low stock: ${lowStock.map(p => p.name).join(', ')}`);
+    }
+  }, [products]);
+};
