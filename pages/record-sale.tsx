@@ -21,7 +21,7 @@ export default function RecordSale() {
     if (!user) return;
 
     const { data, error } = await supabase
-      .from('Products')
+      .from('products')
       .select('*')
       .eq('client_id', user.client_id)
       .eq('branch_id', user.branch_id)
@@ -70,7 +70,7 @@ export default function RecordSale() {
     }
 
     // 🔹 Update stock
-    const { error: updateError } = await supabase.from('Products').update(
+    const { error: updateError } = await supabase.from('products').update(
       { stock: product.stock - quantity })
       .eq('id', productId);
 

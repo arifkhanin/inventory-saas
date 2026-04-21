@@ -24,10 +24,12 @@ export default function AddProduct() {
   const [selected, setSelected] = useState<string[]>([]);
   const router = useRouter();   
   const [canDelete, setCanDelete] = useState(false);
-  
+  const [user, setUser] = useState<any>(null);
+  const canAdd = user && canUser(user, 'products', 'add');
+  const canEdit = user && canUser(user, 'products', 'update');
+  const canDeleteUI = canDelete; // already set
+
   const fetchProducts = async (query = '') => {
-    console.log("FETCH CALLED");
-  
     const user = await getUserContext();
     console.log("USER CONTEXT:", user);
   
@@ -62,7 +64,7 @@ export default function AddProduct() {
     const user = await getUserContext();
     if (!user) return;
 
-    const allowed = await canUser('products.delete');
+    const allowed = canUser(user,'products','delete');
     if (!allowed) {
       alert("No permission");
       return;
@@ -89,9 +91,9 @@ export default function AddProduct() {
     const user = await getUserContext();
     if (!user) return;
   
-    const allowed = await canUser('products.delete');
+    const allowed = canUser(user,'products','delete');
     if (!allowed) {
-      alert("No permission to add");
+      alert("No permission to delete");
       return;
     }
 
@@ -197,7 +199,7 @@ export default function AddProduct() {
       return;
     }
 
-    const allowed = await canUser('products.add');
+    const allowed = canUser(user,'products','add');
     if (!allowed) {
       alert("No permission to add");
       return;
@@ -271,20 +273,23 @@ export default function AddProduct() {
 
   useEffect(() => {
     const init = async () => {
-      const user = await getUserContext();
-  
-      console.log("USER CONTEXT:", user);
-  
-      if (!user) {
-        router.push('/login');
-        return;
-      }
-      const allowed = await canUser('products.delete');
-      console.log("CAN DELETE:", allowed);
-      canUser('products.delete').then(setCanDelete);
-      fetchProducts(); // now safe
+    const u = await getUserContext();
+
+    console.log("USER CONTEXT:", u);
+
+    if (!u) {
+      router.push('/login');
+      return;
+    }
+
+    setUser(u); // ✅ store once
+
+    const canDelete = canUser(u, 'products', 'delete');
+    setCanDelete(canDelete);
+
+    fetchProducts();
     };
-  
+
     init();
   }, []);
 
@@ -318,7 +323,7 @@ export default function AddProduct() {
           <option value="name">Name</option>
           <option value="price">Price</option>
           <option value="stock">Stock</option>
-          <option value="threshold">Stock</option>
+          <option value="low_stock_threshold">Threshold</option>
         </select>
         <button
           onClick={() => fetchProducts(search)}
@@ -338,8 +343,8 @@ export default function AddProduct() {
           Delete Selected ({selected.length})
         </button>
         )}
-
       </div>
+
       <h1 className="text-2xl font-bold mb-4">Add Products</h1>
   
       {/* 🔥 Grid */}
@@ -427,16 +432,21 @@ export default function AddProduct() {
       {/* Actions */}
       <div className="flex gap-3 mt-4">
 
-        <button
-          onClick={addRow}
-          className="bg-gray-200 px-4 py-2 rounded"
-        >
-          + Add Row
-        </button>
+        {canAdd && (
+          <button
+            onClick={addRow}
+            className="bg-gray-200 px-4 py-2 rounded"
+          >
+            + Add Row
+          </button>
+        )}
+
         <button
           onClick={handleBulkSave}
-          disabled={loading}
-          className="bg-blue-600 text-white px-4 py-2 rounded"
+          disabled={loading || !canAdd}
+          className={`px-4 py-2 rounded text-white ${
+            !canAdd ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600'
+          }`}
         >
           {loading ? 'Saving...' : 'Save All'}
         </button>
@@ -491,94 +501,97 @@ export default function AddProduct() {
           }}
         />      
       </div>
+
       <div className="mt-6 bg-white p-4 rounded-xl shadow">
-      <h2 className="font-semibold mb-3">Products</h2>
-  
-      {products.length === 0 && (
-        <p className="text-gray-500">No products found</p>
-      )}
-      {products.map(p => (
-        <div
-          key={p.id}
-          className={`flex justify-between items-center p-3 rounded-lg transition ${
-            p.stock === 0
-              ? 'bg-red-100'
-              : p.stock <= p.low_stock_threshold
-              ? 'bg-yellow-50'
-              : 'bg-gray-50 dark:bg-gray-700'
-          }`}
-        >
-          <input
-            type="checkbox"
-            checked={selected.includes(p.id)}
-            onChange={() => toggleSelect(p.id)}
-          />
+        <h2 className="font-semibold mb-3">Products</h2>
+    
+        {products.length === 0 && (
+          <p className="text-gray-500">No products found</p>
+        )}
+        {products.map(p => (
+          <div
+            key={p.id}
+            className={`flex justify-between items-center p-3 rounded-lg transition ${
+              p.stock === 0
+                ? 'bg-red-100'
+                : p.stock <= p.low_stock_threshold
+                ? 'bg-yellow-50'
+                : 'bg-gray-50 dark:bg-gray-700'
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={selected.includes(p.id)}
+              onChange={() => toggleSelect(p.id)}
+            />
 
-          {editingId === p.id ? (
-            <div className="flex gap-2">
-              <input
-                value={editRow.name}
-                onChange={e => setEditRow({ ...editRow, name: e.target.value })}
-                className="border p-1"
-              />
-              <input
-                value={editRow.price}
-                onChange={e => setEditRow({ ...editRow, price: e.target.value })}
-                className="border p-1 w-20"
-              />
-              <input
-                value={editRow.stock}
-                onChange={e => setEditRow({ ...editRow, stock: e.target.value })}
-                className="border p-1 w-20"
-              />
-              <input
-                value={editRow.low_stock_threshold}
-                onChange={e =>
-                  setEditRow({
-                    ...editRow,
-                    low_stock_threshold: e.target.value
-                  })
-                }
-                className="border p-1 w-20"
-              />
-            </div>
-          ) : (
-            <div>
-              <strong>{p.name}</strong>
-              <div className="text-sm text-gray-500">
-                ₹{p.price} | Stock: {p.stock} | Threshold: {p.low_stock_threshold}
-              </div>
-            </div>
-          )}
-
-          <div className="flex gap-2">
             {editingId === p.id ? (
-              <button
-                onClick={() => handleUpdate(p.id)}
-                className="bg-green-500 text-white px-2 rounded"
-              >
-                Save
-              </button>
+              <div className="flex gap-2">
+                <input
+                  value={editRow.name}
+                  onChange={e => setEditRow({ ...editRow, name: e.target.value })}
+                  className="border p-1"
+                />
+                <input
+                  value={editRow.price}
+                  onChange={e => setEditRow({ ...editRow, price: e.target.value })}
+                  className="border p-1 w-20"
+                />
+                <input
+                  value={editRow.stock}
+                  onChange={e => setEditRow({ ...editRow, stock: e.target.value })}
+                  className="border p-1 w-20"
+                />
+                <input
+                  value={editRow.low_stock_threshold}
+                  onChange={e =>
+                    setEditRow({
+                      ...editRow,
+                      low_stock_threshold: e.target.value
+                    })
+                  }
+                  className="border p-1 w-20"
+                />
+              </div>
             ) : (
-              <button
-                onClick={() => {
-                  setEditingId(p.id);
-                  setEditRow(p);
-                }}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg"
-              >
-                Edit
-              </button>
+              <div>
+                <strong>{p.name}</strong>
+                <div className="text-sm text-gray-500">
+                  ₹{p.price} | Stock: {p.stock} | Threshold: {p.low_stock_threshold}
+                </div>
+              </div>
             )}
 
-            {canDelete && (
-              <button onClick={() => handleDelete(p.id)}>
-                Delete
-              </button>
-            )}
+            <div className="flex gap-2">
+              {editingId === p.id && canEdit && (
+                <button
+                  onClick={() => handleUpdate(p.id)}
+                  className="bg-green-500 text-white px-2 rounded"
+                >
+                  Save
+                </button>
+              )}
+            {/* ) : ( */}
+              {canEdit && (
+                <button
+                  onClick={() => {
+                    setEditingId(p.id);
+                    setEditRow(p);
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg"
+                >
+                  Edit
+                </button>
+              )}
+          {/* )} */}
+              {canDelete && (
+                <button onClick={() => handleDelete(p.id)}>
+                  Delete
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
       </div>  
     </div>
   );
