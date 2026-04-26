@@ -1,129 +1,163 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import { getUserContext } from "../../lib/getUserContext";
 import { useRouter } from "next/router";
 import { requireAdmin } from "../../lib/requireAdmin";
 
 export default function GroupPermissionsPage() {
+  const router = useRouter();
+
   const [user, setUser] = useState<any>(null);
 
   const [groups, setGroups] = useState<any[]>([]);
-  const [permissions, setPermissions] = useState<any[]>([]);
+  const [definitions, setDefinitions] = useState<any[]>([]);
 
-  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [selectedGroup, setSelectedGroup] = useState("");
 
   const [assigned, setAssigned] = useState<any[]>([]);
   const [available, setAvailable] = useState<any[]>([]);
 
-  const router = useRouter();
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const init = async () => {
-      const u = await requireAdmin(router);
-      if (!u) return;
-  
-      setUser(u);
-  
-      // ✅ Load base data
-      await fetchGroups(u.client_id);
-      await fetchPermissions(u.client_id);
-    };
-  
     init();
   }, []);
 
-  useEffect(() => {
-    if (selectedGroup && permissions.length > 0) {
-      loadGroupPermissions(selectedGroup);
-    }
-  }, [selectedGroup, permissions]);
+  async function init() {
+    const u = await requireAdmin(router);
 
-  const fetchGroups = async (client_id: string) => {
+    if (!u) return;
+
+    setUser(u);
+
+    await Promise.all([
+      fetchGroups(u.client_id),
+      fetchDefinitions(),
+    ]);
+  }
+
+  async function fetchGroups(clientId: string) {
     const { data } = await supabase
       .from("groups")
       .select("*")
-      .eq("client_id", client_id);
+      .eq("client_id", clientId)
+      .order("name");
 
     setGroups(data || []);
-  };
+  }
 
-  const fetchPermissions = async (client_id: string) => {
+  async function fetchDefinitions() {
     const { data } = await supabase
-      .from("permissions")
+      .from("permission_definitions")
       .select("*")
-      .eq("client_id", client_id);
+      .eq("is_active", true)
+      .order("sort_order");
 
-    setPermissions(data || []);
-  };
+    setDefinitions(data || []);
+  }
 
-  const loadGroupPermissions = async (group_id: string) => {
+  async function loadGroupPermissions(groupId: string) {
     const { data } = await supabase
       .from("group_permissions")
       .select("permission_id")
-      .eq("group_id", group_id);
+      .eq("group_id", groupId);
 
-    const assignedIds = (data || []).map((d) => d.permission_id);
-
-    const assignedPerms = permissions.filter((p) =>
-      assignedIds.includes(p.id)
+    const assignedIds = (data || []).map(
+      (x: any) => x.permission_id
     );
 
-    const availablePerms = permissions.filter(
-      (p) => !assignedIds.includes(p.id)
+    const assignedRows = definitions.filter((d) =>
+      assignedIds.includes(d.id)
     );
 
-    setAssigned(assignedPerms);
-    setAvailable(availablePerms);
-  };
+    const availableRows = definitions.filter(
+      (d) => !assignedIds.includes(d.id)
+    );
 
-  const moveToAssigned = (perm: any) => {
-    setAssigned([...assigned, perm]);
-    setAvailable(available.filter((p) => p.id !== perm.id));
-  };
+    setAssigned(assignedRows);
+    setAvailable(availableRows);
+  }
 
-  const moveToAvailable = (perm: any) => {
-    setAvailable([...available, perm]);
-    setAssigned(assigned.filter((p) => p.id !== perm.id));
-  };
+  function moveToAssigned(row: any) {
+    setAssigned([...assigned, row]);
 
-  const handleSave = async () => {
+    setAvailable(
+      available.filter((x) => x.id !== row.id)
+    );
+  }
+
+  function moveToAvailable(row: any) {
+    setAvailable([...available, row]);
+
+    setAssigned(
+      assigned.filter((x) => x.id !== row.id)
+    );
+  }
+
+  async function handleSave() {
     if (!selectedGroup) return;
 
-    // Delete existing
+    setSaving(true);
+    setMessage("");
+
     await supabase
       .from("group_permissions")
       .delete()
       .eq("group_id", selectedGroup);
 
-    // Insert new
-    const inserts = assigned.map((p) => ({
+    const rows = assigned.map((a) => ({
       group_id: selectedGroup,
-      permission_id: p.id,
+      permission_id: a.id,
     }));
 
-    if (inserts.length > 0) {
-      await supabase.from("group_permissions").insert(inserts);
+    if (rows.length > 0) {
+      await supabase
+        .from("group_permissions")
+        .insert(rows);
     }
 
-    alert("Saved successfully");
-  };
+    setSaving(false);
+    setMessage("Permissions saved");
+  }
 
   return (
-    <div className="p-6">
-      <h1 className="text-xl font-bold mb-6">
+    <div className="p-6 max-w-6xl">
+      <h1 className="text-2xl font-bold mb-6">
         Group Permissions
       </h1>
 
+      {message && (
+        <div className="mb-4 text-blue-700 text-sm">
+          {message}
+        </div>
+      )}
+
       {/* GROUP SELECT */}
       <div className="mb-6">
-        <label className="mr-2 font-semibold">Select Group:</label>
+        <label className="font-semibold mr-2">
+          Select Group:
+        </label>
+
         <select
-          onChange={(e) => {
-            setSelectedGroup(e.target.value);
+          value={selectedGroup}
+          onChange={async (e) => {
+            const id = e.target.value;
+
+            setSelectedGroup(id);
+
+            if (id) {
+              await loadGroupPermissions(id);
+            } else {
+              setAssigned([]);
+              setAvailable([]);
+            }
           }}
           className="border p-2"
         >
-          <option value="">-- Select --</option>
+          <option value="">
+            -- Select Group --
+          </option>
+
           {groups.map((g) => (
             <option key={g.id} value={g.id}>
               {g.name}
@@ -132,24 +166,36 @@ export default function GroupPermissionsPage() {
         </select>
       </div>
 
-      {/* DUAL LIST */}
+      {/* LISTS */}
       {selectedGroup && (
-        <div className="flex gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
           {/* AVAILABLE */}
-          <div className="w-1/2">
+          <div>
             <h2 className="font-semibold mb-2">
               Available Permissions
             </h2>
 
-            <div className="border p-2 h-80 overflow-auto">
+            <div className="border p-2 h-96 overflow-auto rounded">
               {available.map((p) => (
                 <div
                   key={p.id}
-                  className="flex justify-between items-center border-b py-1"
+                  className="flex justify-between items-center border-b py-2"
                 >
-                  <span>{p.module}.{p.action}</span>
+                  <span className="font-mono text-sm">
+                    {p.code}
+                  </span>
+
+                  {p.label && (
+                    <span className="text-gray-500 text-xs ml-2">
+                      ({p.label})
+                    </span>
+                  )}
+
                   <button
-                    onClick={() => moveToAssigned(p)}
+                    onClick={() =>
+                      moveToAssigned(p)
+                    }
                     className="text-blue-600"
                   >
                     →
@@ -160,20 +206,31 @@ export default function GroupPermissionsPage() {
           </div>
 
           {/* ASSIGNED */}
-          <div className="w-1/2">
+          <div>
             <h2 className="font-semibold mb-2">
               Assigned Permissions
             </h2>
 
-            <div className="border p-2 h-80 overflow-auto">
+            <div className="border p-2 h-96 overflow-auto rounded">
               {assigned.map((p) => (
                 <div
                   key={p.id}
-                  className="flex justify-between items-center border-b py-1"
+                  className="flex justify-between items-center border-b py-2"
                 >
-                  <span>{p.module}.{p.action}</span>
+                  <span className="font-mono text-sm">
+                    {p.code}
+                  </span>
+
+                  {p.label && (
+                    <span className="text-gray-500 text-xs ml-2">
+                      ({p.label})
+                    </span>
+                  )}
+
                   <button
-                    onClick={() => moveToAvailable(p)}
+                    onClick={() =>
+                      moveToAvailable(p)
+                    }
                     className="text-red-600"
                   >
                     ←
@@ -182,6 +239,7 @@ export default function GroupPermissionsPage() {
               ))}
             </div>
           </div>
+
         </div>
       )}
 
@@ -190,9 +248,10 @@ export default function GroupPermissionsPage() {
         <div className="mt-6">
           <button
             onClick={handleSave}
-            className="bg-green-600 text-white px-4 py-2"
+            disabled={saving}
+            className="bg-green-600 text-white px-4 py-2 rounded"
           >
-            Save Changes
+            {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
       )}

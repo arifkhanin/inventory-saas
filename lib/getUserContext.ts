@@ -1,10 +1,8 @@
-// lib/getUserContext.ts
-
-import { supabase } from './supabase';
+import { supabase } from "./supabase";
 
 export const getUserContext = async () => {
-  // 1. Get logged-in auth user
-  const { data: authData } = await supabase.auth.getUser();
+  const { data: authData } =
+    await supabase.auth.getUser();
 
   if (!authData.user) {
     console.error("No auth user");
@@ -13,54 +11,86 @@ export const getUserContext = async () => {
 
   const authUserId = authData.user.id;
 
-  // 2. Fetch user profile
-  const { data: user, error: userError } = await supabase
-    .from('users')
-    .select('*')
-    .eq('auth_user_id', authUserId)
-    .single();
+  /* ----------------------------------
+     Load user profile
+  -----------------------------------*/
+  const { data: user, error: userError } =
+    await supabase
+      .from("users")
+      .select("*")
+      .eq("auth_user_id", authUserId)
+      .single();
 
   if (userError || !user) {
-    console.error("User profile missing", userError);
+    console.error(
+      "User profile missing",
+      userError
+    );
     return null;
   }
 
-  // 3. Fetch groups + permissions
-  const { data: groupData, error: groupError } = await supabase
-    .from('user_groups')
+  /* ----------------------------------
+     Load group permissions
+     user_groups
+       -> groups
+       -> group_permissions
+       -> permission_definitions
+  -----------------------------------*/
+  const {
+    data: groupData,
+    error: groupError,
+  } = await supabase
+    .from("user_groups")
     .select(`
       group_id,
       groups (
         group_permissions (
-          permissions (module, action)
+          permission_id,
+          permission_definitions (
+            code
+          )
         )
       )
     `)
-    .eq('user_id', user.id);
+    .eq("user_id", user.id);
 
   if (groupError) {
-    console.error("Error fetching groups", groupError);
-  }
+    console.error(
+      "Error fetching groups",
+      groupError
+    )
+    return null;
+  };
 
-  // 4. Flatten permissions
-  const permissions: any[] = [];
+  /* ----------------------------------
+     Flatten permissions
+  -----------------------------------*/
+  const permissions: string[] = [];
 
-  groupData?.forEach((g) => {
+  groupData?.forEach((g: any) => {
     g.groups?.group_permissions?.forEach((gp: any) => {
-      if (gp.permissions) {
-        permissions.push(gp.permissions);
+      if (gp.permission_definitions?.code) {
+        permissions.push(gp.permission_definitions.code);
       }
     });
   });
+  /* ----------------------------------
+     Remove duplicates
+  -----------------------------------*/
+  const uniquePermissions = [
+    ...new Set(permissions),
+  ];
 
-  // 5. Remove duplicates
-  const uniquePermissions = Array.from(
-    new Map(
-      permissions.map((p) => [`${p.module}-${p.action}`, p])
-    ).values()
-  );
-
-  // 6. Return full context
+  console.log("User Context:", {
+    userId: user.id,
+    client_id: user.client_id,
+    role: user.role,
+    permissions: uniquePermissions,
+  });
+  
+  /* ----------------------------------
+     Return full context
+  -----------------------------------*/
   return {
     ...user,
     permissions: uniquePermissions,

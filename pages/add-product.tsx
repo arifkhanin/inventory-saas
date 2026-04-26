@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { getCurrentUser } from '../lib/getUser';
 import Tesseract from 'tesseract.js';
@@ -12,23 +12,32 @@ import { applyRoleFilter } from '../lib/queryHelpers';
 export default function AddProduct() {
   console.log("PAGE LOADED");
   const [rows, setRows] = useState([
-    { name: '', price: '', gst: '', stock: '', threshold: '' }
+    { id: Date.now(), name: '', price: '', gst_rate: '', stock: '', threshold: '' }
   ]);
-
+  const firstInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  //const [searchBy, setSearchBy] = useState('name');
   const [products, setProducts] = useState<any[]>([]);
   const [sortBy, setSortBy] = useState('name');
+  const [searchBy, setSearchBy] = useState('name');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editRow, setEditRow] = useState<any>({});
+  const [isEditOpen, setIsEditOpen] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const router = useRouter();   
   const [canDelete, setCanDelete] = useState(false);
   const [user, setUser] = useState<any>(null);
-  const canAdd = user && canUser(user, 'products', 'add');
-  const canEdit = user && canUser(user, 'products', 'update');
+  const canAdd = user && canUser(user, 'products.add');
+  const canEdit = user && canUser(user, 'products.update');
   const canDeleteUI = canDelete; // already set
-
+  const [mode, setMode] = useState<'view' | 'add' | 'bulk'>('view');
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(10);
+  const [totalCount, setTotalCount] = useState(0);
+  
   const fetchProducts = async (query = '') => {
     const user = await getUserContext();
     console.log("USER CONTEXT:", user);
@@ -36,21 +45,40 @@ export default function AddProduct() {
     if (!user) return;
   
     // ✅ Base query
-    let req = supabase.from('products').select('*');
-  
+    let req = supabase
+    .from('products')
+    .select('*', { count: 'exact' });
+    
     // ✅ Apply role filter
     req = applyRoleFilter(req, user);
   
     // ✅ Search
     if (query) {
-      req = req.ilike('name', `%${query}%`);
+      if (searchBy === 'name') {
+        req = req.ilike('name', `%${query}%`);
+      } else {
+        const num = Number(query);
+    
+        if (!isNaN(num)) {
+          req = req.eq(searchBy, num);
+        } else {
+          alert('Enter a valid number for this search');
+          return;
+        }
+      }
     }
   
     // ✅ Sorting
     req = req.order(sortBy, { ascending: true });
   
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    req = req.range(from, to);
+
     // ✅ Execute
-    const { data, error } = await req;
+    const { data, error, count } = await req;
+    setTotalCount(count ?? 0);
   
     if (error) {
       console.error("FETCH ERROR:", error);
@@ -62,21 +90,29 @@ export default function AddProduct() {
 
   const handleDelete = async (id: string) => {
     const user = await getUserContext();
-    if (!user) return;
 
-    const allowed = canUser(user,'products','delete');
-    if (!allowed) {
-      alert("No permission");
+    const res = await fetch('/api/products/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ id, user }),
+    });
+    
+    if (!res.ok) {
+      const msg = await res.text();
+      alert(msg);
       return;
     }
-    await supabase
-      .from('products')
-      .delete()
-      .eq('id', id)
-      .eq('client_id', user.client_id)
-      .eq('branch_id', user.branch_id);
+    setSelected([]);
+    setEditingId(null);
+    
+    fetchProducts(debouncedSearch);
+    
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
   
-    fetchProducts();
   };
 
   const toggleSelect = (id: string) => {
@@ -91,7 +127,7 @@ export default function AddProduct() {
     const user = await getUserContext();
     if (!user) return;
   
-    const allowed = canUser(user,'products','delete');
+    const allowed = canUser(user,'products.delete');
     if (!allowed) {
       alert("No permission to delete");
       return;
@@ -105,46 +141,77 @@ export default function AddProduct() {
     const confirmDelete = confirm('Delete selected products?');
     if (!confirmDelete) return;
   
-    const { error } = await supabase
-      .from('products')
-      .delete()
-      .in('id', selected)
-      .eq('client_id', user.client_id)   // ✅ CRITICAL
-      .eq('branch_id', user.branch_id);  // ✅ CRITICAL
-  
-    if (error) {
-      console.error(error);
-      alert('Error deleting products');
-    } else {
-      alert('Deleted successfully');
-      setSelected([]);
-      fetchProducts();
+    //const user = await getUserContext();
+
+    const res = await fetch('/api/products/bulk-delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ids: selected, user }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      alert(text);
+      return;
     }
+
+    alert('Deleted successfully');
+
+    setSelected([]);
+    setEditingId(null);
+
+    fetchProducts(debouncedSearch);
+
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
   };
   
   const handleUpdate = async (id: string) => {
     const user = await getUserContext();
     if (!user) return;
   
-    await supabase
-      .from('products')
-      .update({
-        name: editRow.name,
-        price: Number(editRow.price),
-        stock: Number(editRow.stock),
-        low_stock_threshold: Number(editRow.low_stock_threshold)
-      })
-      .eq('id', id)
-      .eq('client_id', user.client_id)
-      .eq('branch_id', user.branch_id);
-  
+    // const user = await getUserContext();
+
+    const res = await fetch('/api/products/update', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id,
+        updates: editRow,
+        user,
+      }),
+    });
+    
+    if (!res.ok) {
+      const text = await res.text();
+      alert(text);
+      return;
+    }
+    
     setEditingId(null);
+    setSelected([]); // 🔥 ADD THIS
     fetchProducts();
+    setIsEditOpen(false);
   };
 
   // 🔹 Add new row
   const addRow = () => {
-    setRows([...rows, { name: '', price: '', gst: '', stock: '', threshold: '' }]);
+    setRows([
+      ...rows,
+      {
+        id: Date.now() + Math.random(),
+        name: '',
+        price: '',
+        gst_rate: '',
+        stock: '',
+        threshold: ''
+      }
+    ]);
   };
 
   // Handle CSV upload
@@ -199,66 +266,55 @@ export default function AddProduct() {
       return;
     }
 
-    const allowed = canUser(user,'products','add');
+    const allowed = canUser(user,'products.add');
     if (!allowed) {
       alert("No permission to add");
       return;
     }
 
     try {
-      // ✅ VALIDATE ONCE (OUTSIDE LOOP)
+   // ✅ VALIDATE ONCE (OUTSIDE LOOP)
       const invalidRows = rows.filter(r => !r.name || !r.price);
-  
+
       if (invalidRows.length > 0) {
         alert(`Fix ${invalidRows.length} invalid rows before saving`);
         setLoading(false);
         return;
       }
-  
-      for (const row of rows) {
-  
-        // 🔍 Check if product exists
-        const { data: existing } = await supabase
-          .from('products')
-          .select('*')
-          .eq('name', row.name)
-          .eq('client_id', user.client_id)
-          .eq('branch_id', user.branch_id)
-          .maybeSingle();
-  
-        if (existing) {
-          // 🔄 Update stock
-          await supabase
-            .from('products')
-            .update({
-              stock: existing.stock + Number(row.stock),
-              low_stock_threshold: Number(
-                row.threshold || existing.low_stock_threshold || 10
-              )
-            })
-            .eq('id', existing.id);
-  
-        } else {
-          // ➕ Insert new product
-          await supabase.from('products').insert([{
-            name: row.name,
-            price: Number(row.price),
-            gst_rate: Number(row.gst),
-            stock: Number(row.stock),
-            low_stock_threshold: Number(row.threshold || 10), // ✅ FIXED
-            client_id: user.client_id,   // ✅ IMPORTANT
-            branch_id: user.branch_id    // ✅ IMPORTANT
-          }]);
-        }
+
+      // 🚀 CALL API
+      const res = await fetch('/api/products/add', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows,
+          user,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        alert(text);
+        setLoading(false);
+        return;
       }
-  
+
       alert('Products saved!');
-  
+      setMode('add'); // 🔥 KEEP USER IN ADD TAB
       // 🔄 Reset grid
-      setRows([{ name: '', price: '', gst: '', stock: '', threshold: '' }]);
-  
-      fetchProducts();
-  
+      setRows([
+        { id: Date.now(), name: '', price: '', gst_rate: '', stock: '', threshold: '' }
+      ]);
+
+      setTimeout(() => {
+        firstInputRef.current?.focus();
+      }, 0);
+
+      setPage(1);
+      setSelected([]);
+      fetchProducts(debouncedSearch);
     } catch (err) {
       console.error(err);
       alert('Error saving products');
@@ -283,8 +339,9 @@ export default function AddProduct() {
     }
 
     setUser(u); // ✅ store once
-
-    const canDelete = canUser(u, 'products', 'delete');
+    console.log("PERMISSIONS:", u.permissions);
+    
+    const canDelete = canUser(u, 'products.delete');
     setCanDelete(canDelete);
 
     fetchProducts();
@@ -293,7 +350,28 @@ export default function AddProduct() {
     init();
   }, []);
 
-  {console.log("LOADING STATE:", loading)}
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300); // ⏳ delay
+  
+    return () => clearTimeout(timer); // cleanup
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1); // reset page on new search
+  }, [debouncedSearch, searchBy]);
+
+  useEffect(() => {
+    if (mode !== 'view') return;
+  
+    fetchProducts(debouncedSearch);
+  
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
+  
+  }, [page, sortBy, debouncedSearch, searchBy, mode]);
 
   return (
     <div className="bg-white dark:bg-gray-800 shadow rounded-xl p-6">
@@ -307,292 +385,400 @@ export default function AddProduct() {
         Toggle Theme
       </button>
 
-      {/* 🔍 SEARCH */}
-      <div className="mb-4 flex gap-2">
-        <input
-          placeholder="Search products..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            fetchProducts(e.target.value);
+      <div className="flex gap-2 mb-4">
+  
+        <button
+          onClick={() => {
+            setMode('view');
+            setPage(1); // reset pagination
           }}
-          className="border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded w-full"
-        />
-
-        <select onChange={(e) => setSortBy(e.target.value)}>
-          <option value="name">Name</option>
-          <option value="price">Price</option>
-          <option value="stock">Stock</option>
-          <option value="low_stock_threshold">Threshold</option>
-        </select>
-        <button
-          onClick={() => fetchProducts(search)}
-          className="bg-gray-200 px-4 rounded"
+          className={`px-3 py-1 rounded ${mode === 'view' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
         >
-          Search
+          View Products
         </button>
-
-        {canDelete && (
-        <button
-          onClick={handleBulkDelete}
-          disabled={selected.length === 0}
-          className={`px-4 rounded text-white ${
-            selected.length === 0 ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-600'
-          }`}
-        >
-          Delete Selected ({selected.length})
-        </button>
-        )}
-      </div>
-
-      <h1 className="text-2xl font-bold mb-4">Add Products</h1>
-  
-      {/* 🔥 Grid */}
-      <div className="bg-white p-4 rounded-xl shadow space-y-2">
-  
-        {/* Header */}
-        <div className="grid grid-cols-6 gap-2 font-semibold text-gray-600">
-          <div>Name</div>
-          <div>Price</div>
-          <div>GST %</div>
-          <div>Stock</div>
-          <div>Threshold</div>
-          <div>Action</div>
-        </div>
-  
-        {/* Rows */}
-        {rows.map((row, i) => (
-          <div
-            key={i}
-            className={`grid grid-cols-6 gap-2 ${
-              isInvalidRow(row) ? 'bg-red-50' : ''
-            }`}
-          >
-  
-            <input
-              className={`border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded ${
-                !row.name ? 'border-red-500' : ''
-              }`}
-              placeholder="Product name"
-              value={row.name}
-              onChange={e => handleChange(i, 'name', e.target.value)}
-            />
-  
-            <input
-              className={`border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded ${
-                !row.price ? 'border-red-500' : ''
-              }`}
-              type="number"
-              placeholder="Price"
-              value={row.price}
-              onChange={e => handleChange(i, 'price', e.target.value)}
-            />
-  
-            <input
-              className={`border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded ${
-                !row.gst ? 'border-red-500' : ''
-              }`}
-              type="number"
-              placeholder="GST"
-              value={row.gst}
-              onChange={e => handleChange(i, 'gst', e.target.value)}
-            />
-  
-            <input
-              className={`border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded ${
-                !row.stock ? 'border-red-500' : ''
-              }`}
-              type="number"
-              placeholder="Stock"
-              value={row.stock}
-              onChange={e => handleChange(i, 'stock', e.target.value)}
-            />
-
-            <input
-              className={`border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded ${
-                !row.threshold ? 'border-red-500' : ''
-              }`}
-              type="number"
-              placeholder="Threshold"
-              value={row.threshold}
-              onChange={e => handleChange(i, 'threshold', e.target.value)}
-            />
-
-            <button
-              onClick={() => removeRow(i)}
-              className="bg-red-500 text-white rounded px-2"
-            >
-              X
-            </button>
-  
-          </div>
-        ))}
-      </div>
-
-      {/* Actions */}
-      <div className="flex gap-3 mt-4">
 
         {canAdd && (
           <button
-            onClick={addRow}
-            className="bg-gray-200 px-4 py-2 rounded"
+            onClick={() => {
+              setMode('add');
+              setPage(1); // reset pagination
+            }}
+            className={`px-3 py-1 rounded ${mode === 'add' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
           >
-            + Add Row
+            Add Products
           </button>
         )}
-
-        <button
-          onClick={handleBulkSave}
-          disabled={loading || !canAdd}
-          className={`px-4 py-2 rounded text-white ${
-            !canAdd ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600'
-          }`}
-        >
-          {loading ? 'Saving...' : 'Save All'}
-        </button>
-      </div>
-      <div>
-        <input
-          type="file"
-          accept=".csv"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-
-            console.log("FILE:", file); // 🔍 debug
-
-            if (!file) {
-              alert("No file selected");
-              return;
-            }
-
-            Papa.parse(file, {
-              header: true,
-              skipEmptyLines: true,
-              complete: (results) => {
-                console.log("RAW CSV:", results.data); // 🔍 debug
-
-                const cleaned = (results.data as any[])
-                  .filter(r => r && (r.name || r.Name))
-                  .map((r: any) => ({
-                    name: (r.name || r.Name || '').trim(),
-                    price: (r.price || r.Price || '').toString().trim(),
-                    gst: (r.gst || r.GST || '').toString().trim(),
-                    stock: (r.stock || r.Stock || '').toString().trim()
-                  }));
-
-                console.log("CLEANED:", cleaned); // 🔍 debug
-
-                if (cleaned.length === 0) {
-                  alert("CSV parsed but no valid rows found");
-                  return;
-                }
-
-                setRows(cleaned); // ✅ THIS SHOULD UPDATE GRID
-              },
-              error: (err) => {
-                console.error("CSV ERROR:", err);
-                alert("CSV parsing failed");
-              }
-            });
-            
-
-            // 🔥 IMPORTANT: reset input so same file works again
-            e.target.value = '';
-          }}
-        />      
       </div>
 
-      <div className="mt-6 bg-white p-4 rounded-xl shadow">
-        <h2 className="font-semibold mb-3">Products</h2>
-    
-        {products.length === 0 && (
-          <p className="text-gray-500">No products found</p>
-        )}
-        {products.map(p => (
-          <div
-            key={p.id}
-            className={`flex justify-between items-center p-3 rounded-lg transition ${
-              p.stock === 0
-                ? 'bg-red-100'
-                : p.stock <= p.low_stock_threshold
-                ? 'bg-yellow-50'
-                : 'bg-gray-50 dark:bg-gray-700'
-            }`}
-          >
+       {mode === 'add' && (
+        <div>
+          <h1 className="text-2xl font-bold mb-4">Add Products</h1>
+
+          {/* 🔥 Grid */}
+          <div className="bg-white p-4 rounded-xl shadow space-y-2">
+
+            {/* Header */}
+            <div className="grid grid-cols-6 gap-2 font-semibold text-gray-600">
+              <div>Name</div>
+              <div>Price</div>
+              <div>GST %</div>
+              <div>Stock</div>
+              <div>Threshold</div>
+              <div>Action</div>
+            </div>
+
+            {/* Rows */}
+            {rows.map((row, i) => (
+              <div
+                key={row.id}
+                className={`grid grid-cols-6 gap-2 ${
+                  isInvalidRow(row) ? 'bg-red-50' : ''
+                }`}
+              >
+
+                <input
+                  ref={i === 0 ? firstInputRef : null}
+                  className={`border px-3 py-2 ${!row.name ? 'border-red-500' : ''}`}
+                  placeholder="Product name"
+                  value={row.name}
+                  onChange={e => handleChange(i, 'name', e.target.value)}
+                />
+
+                <input
+                  className={`border px-3 py-2 ${!row.price ? 'border-red-500' : ''}`}
+                  type="number"
+                  placeholder="Price"
+                  value={row.price}
+                  onChange={e => handleChange(i, 'price', e.target.value)}
+                />
+
+                <input
+                  className="border px-3 py-2"
+                  type="number"
+                  placeholder="GST"
+                  value={row.gst_rate}
+                  onChange={e => handleChange(i, 'gst_rate', e.target.value)}
+                />
+
+                <input
+                  className="border px-3 py-2"
+                  type="number"
+                  placeholder="Stock"
+                  value={row.stock}
+                  onChange={e => handleChange(i, 'stock', e.target.value)}
+                />
+
+                <input
+                  className="border px-3 py-2"
+                  type="number"
+                  placeholder="Threshold"
+                  value={row.threshold}
+                  onChange={e => handleChange(i, 'threshold', e.target.value)}
+                />
+
+                <button
+                  onClick={() => removeRow(i)}
+                  className="bg-red-500 text-white px-2"
+                >
+                  X
+                </button>
+
+              </div>
+            ))}
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-3 mt-4">
+
+            <button
+              onClick={addRow}
+              className="bg-gray-200 px-4 py-2 rounded"
+            >
+              + Add Row
+            </button>
+
+            <button
+              onClick={handleBulkSave}
+              disabled={loading || !canAdd}
+              className="bg-blue-600 text-white px-4 py-2 rounded"
+            >
+              {loading ? 'Saving...' : 'Save All'}
+            </button>
+          </div>
+
+          {/* CSV Upload */}
+          <div className="mt-4">
             <input
-              type="checkbox"
-              checked={selected.includes(p.id)}
-              onChange={() => toggleSelect(p.id)}
-            />
+              type="file"
+              accept=".csv"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
 
-            {editingId === p.id ? (
-              <div className="flex gap-2">
+                Papa.parse(file, {
+                  header: true,
+                  skipEmptyLines: true,
+                  complete: (results) => {
+                    const cleaned = (results.data as any[])
+                      .filter(r => r && (r.name || r.Name))
+                      .map((r: any) => ({
+                        id: Date.now() + Math.random(),
+                        name: (r.name || r.Name || '').trim(),
+                        price: Number(r.price || r.Price || 0),
+                        gst_rate: Number(r.gst || r.GST || 0),
+                        stock: Number(r.stock || r.Stock || 0),
+                        threshold: Number(r.threshold || r.Threshold || 0),
+                      }));
+
+                    setRows(cleaned);
+                  }
+                });
+
+                e.target.value = '';
+              }}
+            />
+          </div>
+
+        </div>
+      )}
+
+      {mode === 'view' && (
+        <div>
+
+          {/* SEARCH */}
+          <div className="mb-4 flex gap-2">
+          <input
+            ref={searchInputRef}
+            placeholder="Search products..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="border px-3 py-2 w-full"
+          />
+
+            <select
+              value={searchBy}
+              onChange={(e) => setSearchBy(e.target.value)}
+            >
+              <option value="name">Name</option>
+              <option value="price">Price</option>
+              <option value="stock">Stock</option>
+              <option value="low_stock_threshold">Threshold</option>
+              <option value="gst_rate">GST</option>
+            </select>
+
+            {/* <button
+              onClick={() => fetchProducts(search)}
+              className="bg-gray-200 px-4"
+            >
+              Search
+            </button> */}
+
+            {canDelete && (
+              <button
+                onClick={handleBulkDelete}
+                disabled={selected.length === 0}
+                className={`px-4 text-white ${
+                  selected.length === 0 ? 'bg-gray-400' : 'bg-red-600'
+                }`}
+              >
+                Delete Selected ({selected.length})
+              </button>
+            )}
+          </div>
+
+          {/* PRODUCT LIST */}
+          <div className="mt-6 bg-white p-4 rounded-xl shadow">
+            <h2 className="font-semibold mb-3">Products</h2>
+
+            {products.length === 0 && (
+              <p className="text-gray-500">No products found</p>
+            )}
+
+            {products.map(p => (
+              <div
+                key={p.id}
+                className="flex justify-between items-center p-3 bg-gray-50 rounded"
+              >
                 <input
-                  value={editRow.name}
+                  type="checkbox"
+                  checked={selected.includes(p.id)}
+                  onChange={() => toggleSelect(p.id)}
+                />
+
+                <div>
+                  <strong>{p.name}</strong>
+                  <div className="text-sm text-gray-500">
+                    ₹{p.price} | Stock: {p.stock} | Threshold: {p.low_stock_threshold}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  {canEdit && (
+                    <button
+                    onClick={() => {
+                      setEditingId(p.id);
+                    
+                      setEditRow({
+                        name: p.name || '',
+                        price: p.price ?? '',
+                        gst_rate: p.gst_rate ?? '',
+                        stock: p.stock ?? '',
+                        low_stock_threshold: p.low_stock_threshold ?? ''
+                      });
+                    
+                      setIsEditOpen(true);
+                    }}
+                      className="bg-blue-600 text-white px-3"
+                    >
+                      Edit
+                    </button>
+                  )}
+
+                  {canDelete && (
+                    <button onClick={() => handleDelete(p.id)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+        </div>
+      )}
+
+      {isEditOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+          
+          <div className="bg-white p-6 rounded-lg w-[400px] shadow-lg">
+            <h2 className="text-lg font-semibold mb-4">Edit Product</h2>
+
+            <div className="space-y-4">
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Product Name</label>
+                <input
+                  value={editRow.name || ''}
                   onChange={e => setEditRow({ ...editRow, name: e.target.value })}
-                  className="border p-1"
+                  className="border w-full px-3 py-2 rounded"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Price (₹)</label>
                 <input
-                  value={editRow.price}
+                  value={editRow.price || ''}
                   onChange={e => setEditRow({ ...editRow, price: e.target.value })}
-                  className="border p-1 w-20"
+                  type="number"
+                  className="border w-full px-3 py-2 rounded"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">GST (%)</label>
                 <input
-                  value={editRow.stock}
+                  value={editRow.gst_rate || ''}
+                  onChange={e => setEditRow({ ...editRow, gst_rate: e.target.value })}
+                  type="number"
+                  className="border w-full px-3 py-2 rounded"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Stock Quantity</label>
+                <input
+                  value={editRow.stock || ''}
                   onChange={e => setEditRow({ ...editRow, stock: e.target.value })}
-                  className="border p-1 w-20"
+                  type="number"
+                  className="border w-full px-3 py-2 rounded"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Low Stock Threshold</label>
                 <input
-                  value={editRow.low_stock_threshold}
+                  value={editRow.low_stock_threshold || ''}
                   onChange={e =>
                     setEditRow({
                       ...editRow,
                       low_stock_threshold: e.target.value
                     })
                   }
-                  className="border p-1 w-20"
+                  type="number"
+                  className="border w-full px-3 py-2 rounded"
                 />
               </div>
-            ) : (
-              <div>
-                <strong>{p.name}</strong>
-                <div className="text-sm text-gray-500">
-                  ₹{p.price} | Stock: {p.stock} | Threshold: {p.low_stock_threshold}
-                </div>
-              </div>
-            )}
 
-            <div className="flex gap-2">
-              {editingId === p.id && canEdit && (
-                <button
-                  onClick={() => handleUpdate(p.id)}
-                  className="bg-green-500 text-white px-2 rounded"
-                >
-                  Save
-                </button>
-              )}
-            {/* ) : ( */}
-              {canEdit && (
-                <button
-                  onClick={() => {
-                    setEditingId(p.id);
-                    setEditRow(p);
-                  }}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg"
-                >
-                  Edit
-                </button>
-              )}
-          {/* )} */}
-              {canDelete && (
-                <button onClick={() => handleDelete(p.id)}>
-                  Delete
-                </button>
-              )}
             </div>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => {
+                  setIsEditOpen(false);
+                  setEditingId(null);
+                }}
+                className="px-4 py-2 bg-gray-300 rounded"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={async () => {
+                  await handleUpdate(editingId!);
+                  setIsEditOpen(false);
+                }}
+                disabled={
+                  !editRow.name?.trim() ||
+                  editRow.price === '' ||
+                  editRow.price === null ||
+                  editRow.price === undefined
+                }
+                className={`px-4 py-2 rounded text-white ${
+                  !editRow.name?.trim() || editRow.price === ''
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-blue-600'
+                }`}
+              >
+                Save
+              </button>
+            </div>
+            
           </div>
-        ))}
-      </div>  
+
+          
+        </div>
+      )}  
+      {mode === 'view' && (
+        <div className="flex justify-between items-center mt-4">
+          <div>
+            Page {page} of {Math.ceil(totalCount / pageSize) || 1}
+          </div>
+
+          <div className="flex gap-2">
+
+            <button
+              onClick={() => setPage(prev => Math.max(prev - 1, 1))}
+              disabled={page === 1}
+              className="px-3 py-1 bg-gray-200 rounded disabled:opacity-50"
+            >
+              Prev
+            </button>
+
+            <button
+              onClick={() =>
+                setPage(prev =>
+                  prev < Math.ceil(totalCount / pageSize) ? prev + 1 : prev
+                )
+              }
+              disabled={page >= Math.ceil(totalCount / pageSize)}
+              className="px-3 py-1 bg-gray-200 rounded disabled:opacity-50"
+            >
+              Next
+            </button>
+
+          </div>
+        </div> 
+      )} 
     </div>
   );
 }

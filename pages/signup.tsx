@@ -25,8 +25,10 @@ export default function SignupPage() {
   };
 
   const handleSignup = async () => {
+    if (loading) return; // prevents double clicks
+  
     setLoading(true);
-
+  
     const {
       client_name,
       contact_name,
@@ -42,14 +44,15 @@ export default function SignupPage() {
     // Basic validation
     if (!client_name || !contact_name || !email || !password || !branch_name) {
       alert("Please fill all required fields");
+      setLoading(false); // ✅ FIX
       return;
     }
   
     if (password.length < 6) {
       alert("Password must be at least 6 characters");
+      setLoading(false); // ✅ FIX
       return;
     }
-  
       // Check if user already exists in users table
     const { data: existingUser } = await supabase
     .from("users")
@@ -127,7 +130,7 @@ export default function SignupPage() {
         name: contact_name,
         email,
         client_id: clientData.id,
-        branch_id: null,
+        branch_id: branchData.id, // ✅ FIXED
         role: "super_user",
       });
 
@@ -138,7 +141,7 @@ export default function SignupPage() {
     }
 
     alert("Account created successfully. Please login.");
-
+    setLoading(false);
     router.push("/login");
   };
 

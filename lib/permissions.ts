@@ -1,10 +1,27 @@
-export const canUser = (user: any, module: string, action: string) => {
-    if (!user) return false;
-  
-    // Admin override
-    if (user.role === 'admin') return true;
-  
-    return user.permissions?.some(
-      (p: any) => p.module === module && p.action === action
-    );
-  };
+export function canUser(
+  user: any,
+  permissionCode: string
+) {
+  if (!user || !Array.isArray(user.permissions)) {
+    return false;
+  }
+
+  return user.permissions.some((p: any) => {
+    // Old string style
+    if (typeof p === "string") {
+      return p === permissionCode;
+    }
+
+    // New object style with code
+    if (p?.code) {
+      return p.code === permissionCode;
+    }
+
+    // Legacy object style module/action
+    if (p?.module && p?.action) {
+      return `${p.module}.${p.action}` === permissionCode;
+    }
+
+    return false;
+  });
+}
