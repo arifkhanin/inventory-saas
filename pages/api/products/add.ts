@@ -1,13 +1,17 @@
-import { supabase } from '../../../lib/supabase';
-import { canUser } from '../../../lib/permissions';
-import { apiGuard } from '../../../lib/apiGuard';
-import { applyTenantFilter } from '../../../lib/tenantQuery';
+import { supabase } from "../../../lib/supabase";
+import { apiGuard } from "../../../lib/apiGuard";
+import { applyTenantFilter } from "../../../lib/tenantQuery";
 
 export default async function handler(req, res) {
   const { rows } = req.body;
 
-  const dbUser = await apiGuard(req, res, 'products', 'add');
-  
+  const dbUser = await apiGuard(
+    req,
+    res,
+    "products",
+    "add"
+  );
+
   if (!dbUser) return;
 
   if (!rows || rows.length === 0) {
@@ -16,53 +20,134 @@ export default async function handler(req, res) {
 
   try {
     for (const row of rows) {
-      // 🔍 Check existing product
+      /* ----------------------------
+         Find existing product
+      -----------------------------*/
       let existingQuery = supabase
-        .from('products')
-        .select('*')
-        .eq('name', row.name);
+        .from("products")
+        .select("*")
+        .eq("name", row.name);
 
-      existingQuery = applyTenantFilter(existingQuery, dbUser);
+      existingQuery =
+        applyTenantFilter(
+          existingQuery,
+          dbUser
+        );
 
-      const { data: existing, error: fetchError } = await existingQuery.maybeSingle();
+      const {
+        data: existing,
+        error: fetchError,
+      } =
+        await existingQuery.maybeSingle();
 
       if (fetchError) {
-        return res.status(500).send(fetchError.message);
+        return res
+          .status(500)
+          .send(fetchError.message);
       }
 
+      /* ----------------------------
+         Existing product
+      -----------------------------*/
       if (existing) {
-        // 🔄 Update stock
         let updateQuery = supabase
-          .from('products')
+          .from("products")
           .update({
-            stock: existing.stock + Number(row.stock),
-            low_stock_threshold: Number(
-              row.threshold || existing.low_stock_threshold || 10
-            )
+            stock:
+              Number(existing.stock || 0) +
+              Number(row.stock || 0),
+
+            low_stock_threshold:
+              Number(
+                row.threshold ||
+                  existing.low_stock_threshold ||
+                  10
+              ),
           })
-          .eq('id', existing.id);
+          .eq("id", existing.id);
 
-        updateQuery = applyTenantFilter(updateQuery, dbUser);
+        updateQuery =
+          applyTenantFilter(
+            updateQuery,
+            dbUser
+          );
 
-        await updateQuery;
-      } else {
-        // ➕ Insert new product
-        await supabase.from('products').insert([{
-          name: row.name,
-          price: Number(row.price),
-          gst_rate: Number(row.gst_rate),
-          stock: Number(row.stock),
-          low_stock_threshold: Number(row.threshold || 10),
-          client_id: dbUser.client_id,
-          branch_id: dbUser.branch_id
-        }]);
+        const { error: updateError } =
+          await updateQuery;
+
+        if (updateError) {
+          console.error(
+            "UPDATE ERROR:",
+            updateError
+          );
+
+          return res
+            .status(500)
+            .send(updateError.message);
+        }
+      }
+
+      /* ----------------------------
+         New product
+      -----------------------------*/
+      else {
+        const {
+          error: insertError,
+        } = await supabase
+          .from("products")
+          .insert([
+            {
+              name: row.name,
+              price: Number(row.price),
+              gst_rate: Number(
+                row.gst_rate || 0
+              ),
+              stock: Number(
+                row.stock || 0
+              ),
+              low_stock_threshold:
+                Number(
+                  row.threshold || 10
+                ),
+
+              client_id:
+                dbUser.client_id,
+
+              branch_id:
+                dbUser.branch_id,
+            },
+          ]);
+
+        if (insertError) {
+          console.error(
+            "INSERT ERROR:",
+            insertError
+          );
+
+          return res
+            .status(500)
+            .send(insertError.message);
+        }
       }
     }
 
-    return res.status(200).json({ success: true });
+    return res
+      .status(200)
+      .json({
+        success: true,
+        message: "Products saved",
+      });
+  } catch (err: any) {
+    console.error(
+      "ADD ERROR:",
+      err
+    );
 
-  } catch (err) {
-    console.error("ADD ERROR:", err);
-    return res.status(500).send("Error saving products");
+    return res
+      .status(500)
+      .send(
+        err.message ||
+          "Error saving products"
+      );
   }
 }
