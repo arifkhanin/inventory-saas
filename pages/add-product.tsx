@@ -14,6 +14,7 @@ export default function AddProduct() {
   const [rows, setRows] = useState([
     { id: Date.now(), name: '', price: '', gst_rate: '', stock: '', threshold: '' }
   ]);
+  const [devToken, setDevToken] =  useState("");
   const firstInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -37,7 +38,99 @@ export default function AddProduct() {
   const [page, setPage] = useState(1);
   const [pageSize] = useState(10);
   const [totalCount, setTotalCount] = useState(0);
+
+// Tooling to get token, user on the browser. Useful for testing
+const showToken = async () => {
+  const { data, error } =
+    await supabase.auth.getSession();
+
+  if (error || !data.session) {
+    alert("No session found");
+    return;
+  }
+
+  setDevToken(
+    data.session.access_token
+  );
+};
+
+const clearToken = () => {
+  setDevToken("");
+};  
+  const copyToken = async () => {
+    const { data, error } =
+      await supabase.auth.getSession();
   
+    if (error || !data.session) {
+      alert("No session found");
+      return;
+    }
+  
+    const token =
+      data.session.access_token;
+  
+    try {
+      await navigator.clipboard.writeText(
+        token
+      );
+  
+      alert("Token copied");
+      return;
+    } catch (err) {
+      // fallback
+    }
+  
+    try {
+      const textarea =
+        document.createElement(
+          "textarea"
+        );
+  
+      textarea.value = token;
+      textarea.style.position =
+        "fixed";
+      textarea.style.left =
+        "-9999px";
+  
+      document.body.appendChild(
+        textarea
+      );
+  
+      textarea.focus();
+      textarea.select();
+  
+      document.execCommand(
+        "copy"
+      );
+  
+      document.body.removeChild(
+        textarea
+      );
+  
+      alert("Token copied");
+    } catch (err) {
+      alert(
+        "Copy failed. Use Show Token and copy manually."
+      );
+    }
+  };
+  
+  const showCurrentUser = async () => {
+    const { data, error } =
+      await supabase.auth.getUser();
+  
+    if (error || !data.user) {
+      alert("No user found");
+      return;
+    }
+  
+    alert(
+      data.user.email ||
+      data.user.id
+    );
+  };
+  //End of tooling
+
   const fetchProducts = async (query = '') => {
     const user = await getUserContext();
     console.log("USER CONTEXT:", user);
@@ -328,6 +421,10 @@ export default function AddProduct() {
   };
 
   useEffect(() => {
+    (window as any).supabase = supabase;
+  }, []);
+
+  useEffect(() => {
     const init = async () => {
     const u = await getUserContext();
 
@@ -340,7 +437,7 @@ export default function AddProduct() {
 
     setUser(u); // ✅ store once
     console.log("PERMISSIONS:", u.permissions);
-    
+
     const canDelete = canUser(u, 'products.delete');
     setCanDelete(canDelete);
 
@@ -384,7 +481,52 @@ export default function AddProduct() {
       >
         Toggle Theme
       </button>
+      {process.env.NODE_ENV ===
+        "development" && (
+        <div className="mb-4 p-3 border rounded bg-yellow-50">
 
+          <div className="flex gap-2 mb-2">
+            <button
+              onClick={showToken}
+              className="px-3 py-1 bg-blue-600 text-white rounded"
+            >
+              Get Token
+            </button>
+
+            <button
+              onClick={clearToken}
+              className="px-3 py-1 bg-gray-500 text-white rounded"
+            >
+              Clear
+            </button>
+
+            <button
+              onClick={showCurrentUser}
+              className="px-3 py-1 bg-green-600 text-white rounded"
+            >
+              Current User
+            </button>
+          </div>
+
+          {devToken && (
+            <input
+              value={devToken}
+              readOnly
+              onFocus={(e) =>
+                e.target.select()
+              }
+              className="w-full border px-2 py-2 text-sm"
+            />
+          )}
+
+          <div className="text-xs mt-1 text-gray-600">
+            Click inside token box,
+            Ctrl + A, Ctrl + C
+          </div>
+
+        </div>
+      )}
+      
       <div className="flex gap-2 mb-4">
   
         <button
