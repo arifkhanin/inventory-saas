@@ -25,7 +25,15 @@ export async function createUnit(clientId: string, name: string, symbol?: string
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    const msg = error.message?.toLowerCase() || "";
+  
+    if (msg.includes("uuid")) {
+      throw new Error("INVALID_ID");
+    }
+  
+    throw error;
+  }
   return data;
 }
 
@@ -39,7 +47,7 @@ export async function updateUnit(
     .from("units")
     .update({
       name: name.trim(),
-      symbol: symbol || null,
+      symbol: symbol?.trim() || null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", id)

@@ -56,17 +56,19 @@ export async function updateCategory(
     .maybeSingle();
 
   if (error) {
-    if (error.message?.toLowerCase().includes("uuid")) {
+    const msg = error.message?.toLowerCase() || "";
+  
+    if (msg.includes("uuid")) {
       throw new Error("INVALID_ID");
     }
-
+  
     throw error;
   }
-
+  
   if (!data) {
     throw new Error("NOT_FOUND");
   }
-
+  
   return data;
 }
 
@@ -86,16 +88,17 @@ export async function deleteCategory(
     .maybeSingle();
 
   if (error) {
-    if (error.message?.toLowerCase().includes("uuid")) {
+    const msg = error.message?.toLowerCase() || "";
+  
+    if (msg.includes("uuid")) {
       throw new Error("INVALID_ID");
     }
-
+  
     throw error;
   }
-
+  
   if (!data) {
     throw new Error("NOT_FOUND");
   }
-
   return data;
 }

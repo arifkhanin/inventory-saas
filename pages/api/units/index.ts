@@ -60,16 +60,27 @@ export default async function handler(
         });
       }
 
-      const data = await createUnit(
-        user.client_id,
-        name,
-        symbol
-      );
-
-      return res.status(201).json({
-        success: true,
-        data,
-      });
+      try {
+        const data = await createUnit(
+          user.client_id,
+          name,
+          symbol
+        );
+      
+        return res.status(201).json({
+          success: true,
+          data,
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_ID") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid ID",
+          });
+        }
+      
+        throw error;
+      }
     }
 
     return res.status(405).json({

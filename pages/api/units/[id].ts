@@ -54,17 +54,35 @@ export default async function handler(
         });
       }
 
-      const data = await updateUnit(
-        id,
-        user.client_id,
-        name,
-        symbol
-      );
-
-      return res.status(200).json({
-        success: true,
-        data,
-      });
+      try {
+        const data = await updateUnit(
+          id,
+          user.client_id,
+          name,
+          symbol
+        );
+      
+        return res.status(200).json({
+          success: true,
+          data,
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_ID") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid ID",
+          });
+        }
+      
+        if (error.message === "NOT_FOUND") {
+          return res.status(404).json({
+            success: false,
+            message: "Unit not found",
+          });
+        }
+      
+        throw error;
+      }
     }
 
     // ---------------------------
@@ -78,15 +96,33 @@ export default async function handler(
         });
       }
 
-      const data = await deleteUnit(
-        id,
-        user.client_id
-      );
-
-      return res.status(200).json({
-        success: true,
-        data,
-      });
+      try {
+        const data = await deleteUnit(
+          id,
+          user.client_id
+        );
+      
+        return res.status(200).json({
+          success: true,
+          data,
+        });
+      } catch (error: any) {
+        if (error.message === "INVALID_ID") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid ID",
+          });
+        }
+      
+        if (error.message === "NOT_FOUND") {
+          return res.status(404).json({
+            success: false,
+            message: "Unit not found",
+          });
+        }
+      
+        throw error;
+      }
     }
 
     return res.status(405).json({
