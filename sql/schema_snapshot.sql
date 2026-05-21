@@ -101,6 +101,7 @@
   client_id uuid not null,
   branch_id uuid not null,
   variant_id uuid not null,
+  financial_year_id uuid null;
   inventory_transaction_group_id uuid not null default gen_random_uuid(),
   parent_transaction_id uuid null,
   transaction_sequence integer not null default 1,
@@ -215,6 +216,121 @@
   constraint tenant_inventory_policies_pkey primary key (id)
 );"
 
+-- PURPOSE
+-- -----------------------------------------------------
+-- Introduces canonical platform-governed
+-- inventory transaction taxonomy.
+--
+-- Eliminates hardcoded inventory semantics.
+--
+-- Establishes:
+--
+-- ✔ data-driven inventory effects
+-- ✔ replay-safe transaction classification
+-- ✔ future valuation foundation
+-- ✔ reporting-safe transaction semantics
+-- ✔ extensible inventory mutation model
+--
+-- IMPORTANT:
+-- -----------------------------------------------------
+-- This table is PLATFORM GOVERNED.
+--
+-- NOT tenant editable.
+--
+-- Inventory transaction semantics define:
+-- - stock physics
+-- - replay behavior
+-- - valuation implications
+-- - audit semantics
+--
+-- Therefore taxonomy must remain canonical.
+-- =====================================================
+
+create table inventory_transaction_types (
+
+    id uuid primary key default gen_random_uuid(),
+
+    transaction_code text not null unique,
+	
+	description text null,
+
+    label text not null,
+
+    affects_stock boolean not null default true,
+
+    stock_effect text not null,
+
+    governance_type text not null default 'operational',
+
+    is_reversible boolean not null default true,
+	
+	is_reversal boolean not null default false,
+
+    requires_reference boolean not null default false,
+
+    affects_valuation boolean not null default true,
+
+    system_reserved boolean not null default true,
+
+    is_active boolean not null default true,
+
+    sort_order integer not null default 0,
+
+    metadata jsonb not null default '{}'::jsonb,
+
+    created_at timestamptz not null default now(),
+	
+	updated_at timestamptz not null default now(),
+
+    constraint chk_inventory_transaction_stock_effect_values
+    check (
+        stock_effect in (
+            'in',
+            'out',
+            'none'
+        )
+    ),
+
+    constraint chk_inventory_transaction_governance
+    check (
+        governance_type in (
+            'operational',
+            'correction',
+            'initialization',
+            'system'
+        )
+    )
+	
+	constraint chk_inventory_reversal_consistency
+	check (
+		(
+			is_reversal = false
+		)
+		or
+		(
+			is_reversal = true
+			and governance_type = 'correction'
+			and stock_effect in ('in', 'out')
+		)
+	)
+);
+comment on table inventory_transaction_types is
+'Canonical platform-governed inventory transaction taxonomy.
+
+Defines immutable inventory semantics.
+
+IMPORTANT:
+- NOT tenant editable
+- governs inventory physics
+- governs replay semantics
+- governs valuation direction
+- governs reporting semantics
+
+This table intentionally replaces hardcoded
+transaction-type logic.
+';
+
+
 indexdef
 CREATE UNIQUE INDEX invoices_pkey ON public."Invoices" USING btree (id)
 CREATE UNIQUE INDEX profiles_pkey ON public."Profiles" USING btree (id)
@@ -264,6 +380,7 @@ create index if not exists idx_inventory_tx_group on inventory_transactions(inve
 create index if not exists idx_inventory_tx_parent on inventory_transactions(parent_transaction_id);
 create index if not exists idx_inventory_tx_sequence on inventory_transactions(inventory_transaction_group_id, transaction_sequence);
 create unique index ux_tenant_inventory_policy on public.tenant_inventory_policies (client_id, branch_id);
+create index idx_inventory_transactions_financial_year on inventory_transactions(financial_year_id);
 
 alter table public.Profiles add constraint profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.Profiles add constraint profiles_pkey PRIMARY KEY (id);
@@ -315,6 +432,7 @@ alter table public.users add constraint users_branch_id_fkey FOREIGN KEY (branch
 alter table public.users add constraint users_client_id_fkey FOREIGN KEY (client_id) REFERENCES clients(id);
 alter table public.users add constraint users_pkey PRIMARY KEY (id);
 alter table inventory_transactions add constraint fk_inventory_parent_transaction foreign key (parent_transaction_id) references inventory_transactions(id);
+alter table inventory_transactions add constraint fk_inventory_transactions_financial_year foreign key (financial_year_id) references financial_years(id);
 
 create or replace function create_product_with_default_variant(
   p_client_id uuid,
@@ -607,37 +725,62 @@ for each row
 execute function prevent_inventory_transaction_delete();
 
 create or replace function create_inventory_transaction(
+
     p_client_id uuid,
     p_branch_id uuid,
     p_variant_id uuid,
-    p_transaction_type text,
+	p_transaction_type text,
     p_quantity numeric,
+	p_financial_year_id uuid default null,
     p_unit_cost numeric default null,
+
     p_reference_type text default null,
     p_reference_id uuid default null,
+
     p_created_by uuid default null,
-    p_inventory_transaction_group_id uuid default gen_random_uuid(),
+
+    p_inventory_transaction_group_id uuid
+        default gen_random_uuid(),
+
     p_parent_transaction_id uuid default null,
+
     p_transaction_sequence integer default 1,
+
     p_remarks text default null,
+
     p_metadata jsonb default '{}'::jsonb
+
 )
+
 returns json
+
 language plpgsql
+
 as $$
+
 declare
 
     ----------------------------------------------------
     -- STOCK VARIABLES
     ----------------------------------------------------
+
     v_delta numeric := 0;
+
     v_current_stock numeric := 0;
+
     v_resulting_stock numeric := 0;
 
     ----------------------------------------------------
     -- POLICY VARIABLES
     ----------------------------------------------------
+
     v_negative_stock_policy text := 'block';
+
+    ----------------------------------------------------
+    -- TAXONOMY VARIABLES
+    ----------------------------------------------------
+
+    v_transaction_type record;
 
 begin
 
@@ -645,8 +788,11 @@ begin
     -- 1. BASIC VALIDATION
     ----------------------------------------------------
 
-    if p_quantity is null or p_quantity <= 0 then
+    if p_quantity is null
+       or p_quantity <= 0 then
+
         raise exception 'INVALID_QUANTITY';
+
     end if;
 
     ----------------------------------------------------
@@ -654,198 +800,400 @@ begin
     ----------------------------------------------------
 
     if not exists (
+
         select 1
         from product_variants
+
         where id = p_variant_id
           and client_id = p_client_id
           and is_active = true
+
     ) then
+
         raise exception 'VARIANT_NOT_FOUND';
+
     end if;
 
+    ----------------------------------------------------
+    -- 3. VALIDATE TRANSACTION TYPE
+    ----------------------------------------------------
+
+    perform validate_inventory_transaction_type(
+        p_transaction_type
+    );
+
 	----------------------------------------------------
-	-- 3. RESOLVE DELTA
+	-- 3.5 VALIDATE FINANCIAL YEAR
 	----------------------------------------------------
 
-	v_delta := get_inventory_transaction_delta(
-		p_transaction_type,
-		p_quantity
-	);
+	if p_financial_year_id is null then
+
+		raise exception
+		'FINANCIAL_YEAR_REQUIRED';
+
+	end if;
+
+	if not exists (
+
+		select 1
+		from financial_years fy
+		where fy.id = p_financial_year_id
+		  and fy.client_id = p_client_id
+		  and fy.branch_id = p_branch_id
+
+	) then
+
+		raise exception
+		'INVALID_FINANCIAL_YEAR';
+
+	end if;
+	
+	if exists (
+
+		select 1
+		from financial_years
+		where id = p_financial_year_id
+		  and is_closed = true
+
+	) then
+
+		raise exception
+		'FINANCIAL_YEAR_CLOSED';
+
+	end if;
+
     ----------------------------------------------------
-    -- 4. ENSURE SNAPSHOT ROW EXISTS
+    -- 4. LOAD TAXONOMY
+    ----------------------------------------------------
+
+    select *
+    into v_transaction_type
+    from inventory_transaction_types
+    where transaction_code = p_transaction_type
+      and is_active = true;
+
+	----------------------------------------------------
+	-- 5. OPENING BALANCE GOVERNANCE
+	----------------------------------------------------
+
+	if v_transaction_type.transaction_code = 'opening_balance' then
+
+		------------------------------------------------
+		-- ONLY ONE OPENING BALANCE ALLOWED
+		------------------------------------------------
+
+		if exists (
+
+		select 1
+		from inventory_transactions
+		where client_id = p_client_id
+		  and branch_id = p_branch_id
+		  and variant_id = p_variant_id
+		  and financial_year_id = p_financial_year_id
+		  and transaction_type = 'opening_balance'
+
+		)
+		then
+			raise exception
+			'OPENING_BALANCE_ALREADY_EXISTS_FOR_PERIOD';
+		end if;
+		
+		------------------------------------------------
+		-- MUST BE FIRST INVENTORY EVENT
+		------------------------------------------------
+
+		if exists (
+
+		select 1
+		from inventory_transactions
+		where client_id = p_client_id
+		  and branch_id = p_branch_id
+		  and variant_id = p_variant_id
+		  and financial_year_id = p_financial_year_id
+
+		)
+		then
+			raise exception
+			'OPENING_BALANCE_MUST_BE_FIRST_TRANSACTION_IN_PERIOD';
+		end if;
+	end if;
+    ----------------------------------------------------
+    -- 6. REVERSAL GOVERNANCE
+    ----------------------------------------------------
+
+    if v_transaction_type.is_reversal = true then
+
+        perform validate_inventory_reversal(
+
+            p_transaction_type,
+            p_parent_transaction_id
+
+        );
+
+    end if;
+
+    ----------------------------------------------------
+    -- 7. RESOLVE DELTA
+    ----------------------------------------------------
+
+    v_delta := get_inventory_transaction_delta(
+
+        p_transaction_type,
+        p_quantity
+
+    );
+
+    ----------------------------------------------------
+    -- 8. ENSURE SNAPSHOT ROW EXISTS
     ----------------------------------------------------
 
     insert into inventory_snapshots (
+
         client_id,
         branch_id,
         variant_id,
+
         quantity,
+
         created_at,
         updated_at
+
     )
     values (
+
         p_client_id,
         p_branch_id,
         p_variant_id,
+
         0,
+
         now(),
         now()
+
     )
-    on conflict (client_id, branch_id, variant_id)
+    on conflict (
+        client_id,
+        branch_id,
+        variant_id
+    )
     do nothing;
 
     ----------------------------------------------------
-    -- 5. LOCK SNAPSHOT ROW
+    -- 9. LOCK SNAPSHOT ROW
     ----------------------------------------------------
 
     select quantity
     into v_current_stock
+
     from inventory_snapshots
+
     where client_id = p_client_id
       and branch_id = p_branch_id
       and variant_id = p_variant_id
+
     for update;
 
-
     ----------------------------------------------------
-    -- 6. SNAPSHOT LOCK VALIDATION
+    -- 10. SNAPSHOT LOCK VALIDATION
     ----------------------------------------------------
 
     if not found then
+
         raise exception 'SNAPSHOT_LOCK_FAILED';
+
     end if;
 
     ----------------------------------------------------
-    -- 7. RESOLVE RESULTING STOCK
+    -- 11. CALCULATE RESULTING STOCK
     ----------------------------------------------------
 
-    v_resulting_stock := v_current_stock + v_delta;
+    v_resulting_stock :=
+        v_current_stock + v_delta;
 
     ----------------------------------------------------
-    -- 8. LOAD NEGATIVE STOCK POLICY
+    -- 12. LOAD NEGATIVE STOCK POLICY
     ----------------------------------------------------
 
     select negative_stock_policy
     into v_negative_stock_policy
+
     from tenant_inventory_policies
+
     where client_id = p_client_id
+
       and (
             branch_id = p_branch_id
             or branch_id is null
       )
+
       and is_active = true
+
     order by
+
         case
             when branch_id = p_branch_id then 1
             else 2
         end
+
     limit 1;
 
     ----------------------------------------------------
-    -- 9. DEFAULT POLICY
+    -- 13. DEFAULT POLICY
     ----------------------------------------------------
 
     if v_negative_stock_policy is null then
+
         v_negative_stock_policy := 'block';
+
     end if;
 
     ----------------------------------------------------
-    -- 10. VALIDATE POLICY VALUE
+    -- 14. VALIDATE POLICY VALUE
     ----------------------------------------------------
 
-    if v_negative_stock_policy not in ('block', 'allow') then
-        raise exception 'INVALID_NEGATIVE_STOCK_POLICY';
+    if v_negative_stock_policy
+       not in ('block', 'allow') then
+
+        raise exception
+        'INVALID_NEGATIVE_STOCK_POLICY';
+
     end if;
 
     ----------------------------------------------------
-    -- 11. ENFORCE NEGATIVE STOCK POLICY
+    -- 15. ENFORCE NEGATIVE STOCK POLICY
     ----------------------------------------------------
 
     if v_negative_stock_policy = 'block'
        and v_resulting_stock < 0 then
 
-        raise exception 'NEGATIVE_STOCK_NOT_ALLOWED';
+        raise exception
+        'NEGATIVE_STOCK_NOT_ALLOWED';
 
     end if;
 
     ----------------------------------------------------
-    -- 12. INSERT IMMUTABLE LEDGER ENTRY
+    -- 16. INSERT IMMUTABLE LEDGER ENTRY
     ----------------------------------------------------
 
     insert into inventory_transactions (
+
         id,
+
         client_id,
         branch_id,
         variant_id,
-        inventory_transaction_group_id,
+
+		financial_year_id,
+
+		inventory_transaction_group_id,
+
         parent_transaction_id,
+
         transaction_sequence,
+
         transaction_type,
+
         quantity,
+
         unit_cost,
+
         reference_type,
         reference_id,
+
         created_by,
+
         remarks,
+
         metadata,
+
         created_at
+
     )
     values (
+
         gen_random_uuid(),
+
         p_client_id,
         p_branch_id,
-        p_variant_id,
-        p_inventory_transaction_group_id,
+		p_variant_id,
+
+		p_financial_year_id,
+
+		p_inventory_transaction_group_id,
         p_parent_transaction_id,
+
         p_transaction_sequence,
+
         p_transaction_type,
+
         p_quantity,
+
         p_unit_cost,
+
         p_reference_type,
         p_reference_id,
+
         p_created_by,
+
         p_remarks,
+
         p_metadata,
+
         now()
+
     );
 
     ----------------------------------------------------
-    -- 13. UPDATE LOCKED SNAPSHOT
+    -- 17. UPDATE SNAPSHOT
     ----------------------------------------------------
 
     update inventory_snapshots
+
     set
+
         quantity = v_resulting_stock,
+
         updated_at = now()
+
     where client_id = p_client_id
       and branch_id = p_branch_id
       and variant_id = p_variant_id;
 
     ----------------------------------------------------
-    -- 14. AUDIT LOG
+    -- 18. AUDIT LOG
     ----------------------------------------------------
 
     insert into audit_logs (
+
         client_id,
         branch_id,
         user_id,
+
         module,
         action,
+
         entity_id,
+
         metadata,
+
         created_at
+
     )
     values (
+
         p_client_id,
         p_branch_id,
         p_created_by,
+
         'inventory',
         'inventory_transaction_create',
+
         p_variant_id,
 
         jsonb_build_object(
 
-            'transaction_type', p_transaction_type,
+            'transaction_type',
+            p_transaction_type,
 
             'transaction_group_id',
             p_inventory_transaction_group_id,
@@ -856,43 +1204,71 @@ begin
             'transaction_sequence',
             p_transaction_sequence,
 
-            'quantity', p_quantity,
+            'quantity',
+            p_quantity,
 
-            'applied_delta', v_delta,
+            'applied_delta',
+            v_delta,
 
-            'previous_stock', v_current_stock,
+            'previous_stock',
+            v_current_stock,
 
-            'current_stock', v_resulting_stock,
+            'current_stock',
+            v_resulting_stock,
 
             'negative_stock_policy',
             v_negative_stock_policy,
 
-            'reference_type', p_reference_type,
+            'reference_type',
+            p_reference_type,
 
-            'reference_id', p_reference_id,
+            'reference_id',
+            p_reference_id,
 
-            'remarks', p_remarks,
+            'remarks',
+            p_remarks,
 
-            'metadata', p_metadata
+            'metadata',
+            p_metadata
 
         ),
 
         now()
+
     );
+
     ----------------------------------------------------
-    -- 15. RETURN RESPONSE
+    -- 19. RETURN RESPONSE
     ----------------------------------------------------
 
     return json_build_object(
+
         'success', true,
-        'transaction_group_id', p_inventory_transaction_group_id,
-        'variant_id', p_variant_id,
-        'transaction_type', p_transaction_type,
-        'quantity', p_quantity,
-        'applied_delta', v_delta,
-        'previous_stock', v_current_stock,
-        'current_stock', v_resulting_stock,
-        'negative_stock_policy', v_negative_stock_policy
+
+        'transaction_group_id',
+        p_inventory_transaction_group_id,
+
+        'variant_id',
+        p_variant_id,
+
+        'transaction_type',
+        p_transaction_type,
+
+        'quantity',
+        p_quantity,
+
+        'applied_delta',
+        v_delta,
+
+        'previous_stock',
+        v_current_stock,
+
+        'current_stock',
+        v_resulting_stock,
+
+        'negative_stock_policy',
+        v_negative_stock_policy
+
     );
 
 end;
@@ -1005,14 +1381,22 @@ end;
 $$;
 
 create or replace function get_inventory_transaction_delta(
+
     p_transaction_type text,
     p_quantity numeric
+
 )
+
 returns numeric
+
 language plpgsql
+
 as $$
+
 declare
-    v_delta numeric := 0;
+
+    v_stock_effect text;
+
 begin
 
     ----------------------------------------------------
@@ -1024,46 +1408,66 @@ begin
     end if;
 
     ----------------------------------------------------
-    -- DELTA MAPPING
+    -- LOAD TRANSACTION TYPE
     ----------------------------------------------------
 
-    case p_transaction_type
+    select stock_effect
+    into v_stock_effect
+    from inventory_transaction_types
+    where transaction_code = p_transaction_type
+      and is_active = true;
 
-        when 'purchase' then
-            v_delta := p_quantity;
+    if not found then
 
-        when 'sale' then
-            v_delta := -p_quantity;
+        raise exception
+        'INVALID_TRANSACTION_TYPE: %',
+        p_transaction_type;
 
-        when 'transfer_in' then
-            v_delta := p_quantity;
+    end if;
 
-        when 'transfer_out' then
-            v_delta := -p_quantity;
+    ----------------------------------------------------
+    -- RESOLVE DELTA
+    ----------------------------------------------------
 
-        when 'return_in' then
-            v_delta := p_quantity;
+    case v_stock_effect
 
-        when 'damage' then
-            v_delta := -p_quantity;
+        when 'in' then
+            return p_quantity;
 
-        when 'adjustment' then
-            v_delta := p_quantity;
+        when 'out' then
+            return -p_quantity;
 
-        when 'opening_balance' then
-            v_delta := p_quantity;
+        when 'none' then
+            return 0;
 
         else
+
             raise exception
-            'INVALID_TRANSACTION_TYPE: %',
-            p_transaction_type;
+            'INVALID_STOCK_EFFECT: %',
+            v_stock_effect;
 
     end case;
 
-    return v_delta;
-
 end;
 $$;
+
+comment on function get_inventory_transaction_delta(
+    text,
+    numeric
+)
+is
+'Canonical centralized inventory delta resolver.
+
+IMPORTANT:
+- data-driven via inventory_transaction_types
+- replay-safe
+- rebuild-safe
+- valuation-safe
+
+ALL inventory mutation and replay flows
+must use this function.
+';
+
 create or replace function validate_inventory_snapshot_drift(
     p_client_id uuid,
     p_branch_id uuid default null,
@@ -1198,3 +1602,549 @@ begin
 
 end;
 $$;
+
+create or replace function reverse_inventory_transaction(
+
+    p_transaction_id uuid,
+    p_reversed_by uuid,
+    p_reason text default null
+
+)
+
+returns json
+
+language plpgsql
+
+as $$
+
+declare
+
+    ----------------------------------------------------
+    -- ORIGINAL TRANSACTION
+    ----------------------------------------------------
+
+    v_original_transaction record;
+
+    ----------------------------------------------------
+    -- ORIGINAL TAXONOMY
+    ----------------------------------------------------
+
+    v_original_type record;
+
+    ----------------------------------------------------
+    -- REVERSAL TYPE
+    ----------------------------------------------------
+
+    v_reversal_transaction_type text;
+
+    ----------------------------------------------------
+    -- REVERSAL RESULT
+    ----------------------------------------------------
+
+    v_reversal_result json;
+
+begin
+
+    ----------------------------------------------------
+    -- 1. LOAD ORIGINAL TRANSACTION
+    ----------------------------------------------------
+
+    select *
+    into v_original_transaction
+    from inventory_transactions
+    where id = p_transaction_id;
+
+    if not found then
+
+        raise exception
+        'TRANSACTION_NOT_FOUND';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 2. LOAD ORIGINAL TRANSACTION TYPE
+    ----------------------------------------------------
+
+    select *
+    into v_original_type
+    from inventory_transaction_types
+    where transaction_code =
+          v_original_transaction.transaction_type
+      and is_active = true;
+
+    if not found then
+
+        raise exception
+        'ORIGINAL_TRANSACTION_TYPE_INVALID';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 3. PREVENT REVERSAL OF REVERSALS
+    ----------------------------------------------------
+
+    if v_original_type.is_reversal = true then
+
+        raise exception
+        'REVERSAL_OF_REVERSAL_NOT_ALLOWED';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 4. CHECK REVERSAL ELIGIBILITY
+    ----------------------------------------------------
+
+    if v_original_type.is_reversible = false then
+
+        raise exception
+        'TRANSACTION_TYPE_DOES_NOT_ALLOW_REVERSAL';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 5. DETERMINE REVERSAL TYPE
+    ----------------------------------------------------
+
+    case v_original_type.stock_effect
+
+        when 'in' then
+
+            v_reversal_transaction_type :=
+                'reversal_negative';
+
+        when 'out' then
+
+            v_reversal_transaction_type :=
+                'reversal_positive';
+
+        else
+
+            raise exception
+            'INVALID_ORIGINAL_STOCK_EFFECT';
+
+    end case;
+
+    ----------------------------------------------------
+    -- 6. VALIDATE REVERSAL GOVERNANCE
+    ----------------------------------------------------
+
+    perform validate_inventory_reversal(
+
+        v_reversal_transaction_type,
+        v_original_transaction.id
+
+    );
+
+    ----------------------------------------------------
+    -- 7. CREATE REVERSAL TRANSACTION
+    ----------------------------------------------------
+
+    select create_inventory_transaction(
+
+        p_client_id := v_original_transaction.client_id,
+
+        p_branch_id := v_original_transaction.branch_id,
+
+        p_variant_id := v_original_transaction.variant_id,
+
+        p_transaction_type :=
+            v_reversal_transaction_type,
+
+        p_quantity :=
+            v_original_transaction.quantity,
+		
+		p_financial_year_id :=
+			v_original_transaction.financial_year_id,
+
+        p_unit_cost :=
+            v_original_transaction.unit_cost,
+
+        p_reference_type :=
+            'inventory_reversal',
+
+        p_reference_id :=
+            v_original_transaction.id,
+
+        p_created_by :=
+            p_reversed_by,
+
+        ------------------------------------------------
+        -- SAME GROUP FOR LINEAGE
+        ------------------------------------------------
+
+        p_inventory_transaction_group_id :=
+            v_original_transaction.inventory_transaction_group_id,
+
+        ------------------------------------------------
+        -- PARENT LINK
+        ------------------------------------------------
+
+        p_parent_transaction_id :=
+            v_original_transaction.id,
+
+        ------------------------------------------------
+        -- DETERMINISTIC ORDERING
+        ------------------------------------------------
+
+        p_transaction_sequence :=
+            v_original_transaction.transaction_sequence + 1,
+
+        p_remarks := coalesce(
+            p_reason,
+            'Inventory reversal'
+        ),
+
+        p_metadata := jsonb_build_object(
+
+            'semantic_class', 'reversal',
+
+            'reversed_transaction_id',
+            v_original_transaction.id,
+
+            'original_transaction_type',
+            v_original_transaction.transaction_type,
+
+            'reversal_transaction_type',
+            v_reversal_transaction_type
+
+        )
+
+    )
+    into v_reversal_result;
+
+    ----------------------------------------------------
+    -- 8. RETURN
+    ----------------------------------------------------
+
+    return json_build_object(
+
+        'success', true,
+
+        'original_transaction_id',
+        v_original_transaction.id,
+
+        'original_transaction_type',
+        v_original_transaction.transaction_type,
+
+        'reversal_transaction_type',
+        v_reversal_transaction_type,
+
+        'transaction_group_id',
+        v_original_transaction.inventory_transaction_group_id,
+
+        'reversal_result',
+        v_reversal_result
+
+    );
+
+end;
+$$;
+
+
+-- =====================================================
+-- DOCUMENTATION
+-- =====================================================
+
+comment on function reverse_inventory_transaction(
+    uuid,
+    uuid,
+    text
+)
+is
+'Canonical taxonomy-driven inventory reversal RPC.
+
+Features:
+- immutable compensating reversal model
+- taxonomy-driven reversal semantics
+- replay-safe lineage preservation
+- deterministic ordering
+- grouped reversal lineage
+
+IMPORTANT:
+- uses SAME transaction group id
+- prevents reversal-of-reversal
+- validates taxonomy legality
+';
+
+create or replace function validate_inventory_transaction_type(
+
+    p_transaction_type text
+
+)
+
+returns json
+
+language plpgsql
+
+as $$
+
+declare
+
+    v_type record;
+
+begin
+
+    ----------------------------------------------------
+    -- LOAD ACTIVE TAXONOMY ENTRY
+    ----------------------------------------------------
+
+    select *
+    into v_type
+    from inventory_transaction_types
+    where transaction_code = p_transaction_type
+      and is_active = true;
+
+    if not found then
+
+        raise exception
+        'INVALID_TRANSACTION_TYPE: %',
+        p_transaction_type;
+
+    end if;
+
+    ----------------------------------------------------
+    -- RETURN NORMALIZED TAXONOMY
+    ----------------------------------------------------
+
+    return json_build_object(
+
+        'success', true,
+
+        'transaction_code',
+        v_type.transaction_code,
+
+        'label',
+        v_type.label,
+
+        'description',
+        v_type.description,
+
+        'stock_effect',
+        v_type.stock_effect,
+
+        'governance_type',
+        v_type.governance_type,
+
+        'affects_stock',
+        v_type.affects_stock,
+
+        'affects_valuation',
+        v_type.affects_valuation,
+
+        'is_reversible',
+        v_type.is_reversible,
+
+        'requires_reference',
+        v_type.requires_reference,
+
+        'system_reserved',
+        v_type.system_reserved,
+
+        'metadata',
+        v_type.metadata
+
+    );
+
+end;
+$$;
+
+create or replace function validate_inventory_reversal(
+
+    p_transaction_type text,
+    p_parent_transaction_id uuid
+
+)
+
+returns json
+
+language plpgsql
+
+as $$
+
+declare
+
+    ----------------------------------------------------
+    -- NEW REVERSAL TYPE
+    ----------------------------------------------------
+
+    v_new_type record;
+
+    ----------------------------------------------------
+    -- PARENT TRANSACTION
+    ----------------------------------------------------
+
+    v_parent record;
+
+    ----------------------------------------------------
+    -- PARENT TAXONOMY
+    ----------------------------------------------------
+
+    v_parent_type record;
+
+begin
+
+    ----------------------------------------------------
+    -- 1. LOAD NEW TRANSACTION TYPE
+    ----------------------------------------------------
+
+    select *
+    into v_new_type
+    from inventory_transaction_types
+    where transaction_code = p_transaction_type
+      and is_active = true;
+
+    if not found then
+
+        raise exception
+        'INVALID_TRANSACTION_TYPE';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 2. ENSURE NEW TYPE IS REVERSAL CLASS
+    ----------------------------------------------------
+
+    if v_new_type.is_reversal = false then
+	
+        raise exception
+        'TRANSACTION_TYPE_IS_NOT_REVERSAL';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 3. PARENT REQUIRED
+    ----------------------------------------------------
+
+    if p_parent_transaction_id is null then
+
+        raise exception
+        'REVERSAL_PARENT_REQUIRED';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 4. LOAD PARENT TRANSACTION
+    ----------------------------------------------------
+
+    select *
+    into v_parent
+    from inventory_transactions
+    where id = p_parent_transaction_id;
+
+    if not found then
+
+        raise exception
+        'PARENT_TRANSACTION_NOT_FOUND';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 5. LOAD PARENT TAXONOMY
+    ----------------------------------------------------
+
+    select *
+    into v_parent_type
+    from inventory_transaction_types
+    where transaction_code = v_parent.transaction_type
+      and is_active = true;
+
+    if not found then
+
+        raise exception
+        'PARENT_TRANSACTION_TYPE_INVALID';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 6. PREVENT REVERSAL OF REVERSAL
+    ----------------------------------------------------
+
+    if v_parent_type.is_reversal = true then
+
+        raise exception
+        'REVERSAL_OF_REVERSAL_NOT_ALLOWED';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 7. CHECK REVERSAL ELIGIBILITY
+    ----------------------------------------------------
+
+    if v_parent_type.is_reversible = false then
+
+        raise exception
+        'TRANSACTION_TYPE_DOES_NOT_ALLOW_REVERSAL';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 8. VALIDATE OPPOSITE STOCK EFFECT
+    ----------------------------------------------------
+
+    if v_new_type.stock_effect
+       = v_parent_type.stock_effect then
+
+        raise exception
+        'REVERSAL_EFFECT_MISMATCH';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 9. PREVENT DOUBLE REVERSAL
+    ----------------------------------------------------
+
+    if exists (
+
+        select 1
+        from inventory_transactions it
+
+        join inventory_transaction_types itt
+          on itt.transaction_code = it.transaction_type
+
+        where it.parent_transaction_id = v_parent.id
+
+          and itt.is_reversal = true
+
+    ) then
+
+        raise exception
+        'TRANSACTION_ALREADY_REVERSED';
+
+    end if;
+
+    ----------------------------------------------------
+    -- 10. RETURN
+    ----------------------------------------------------
+
+    return json_build_object(
+
+        'success', true,
+
+        'parent_transaction_id',
+        v_parent.id,
+
+        'parent_transaction_type',
+        v_parent.transaction_type,
+
+        'reversal_transaction_type',
+        v_new_type.transaction_code
+
+    );
+
+end;
+$$;
+
+comment on function validate_inventory_transaction_type(
+    text
+)
+is
+'Validates canonical inventory transaction taxonomy.';
+
+
+
+comment on function validate_inventory_reversal(
+    text,
+    uuid
+)
+is
+'Validates reversal legality and lineage correctness.';
