@@ -101,7 +101,7 @@
   client_id uuid not null,
   branch_id uuid not null,
   variant_id uuid not null,
-  financial_year_id uuid null;
+  financial_year_id uuid null,
   inventory_transaction_group_id uuid not null default gen_random_uuid(),
   parent_transaction_id uuid null,
   transaction_sequence integer not null default 1,
@@ -355,6 +355,12 @@ CREATE UNIQUE INDEX inventory_period_snapshots_pkey ON public.inventory_period_s
 CREATE UNIQUE INDEX inventory_snapshots_pkey ON public.inventory_snapshots USING btree (id)
 create unique index ux_inventory_snapshot_unique on inventory_snapshots (client_id, branch_id, variant_id);
 CREATE UNIQUE INDEX inventory_transactions_pkey ON public.inventory_transactions USING btree (id)
+create index if not exists idx_inventory_tx_group on inventory_transactions(inventory_transaction_group_id);
+create index if not exists idx_inventory_tx_parent on inventory_transactions(parent_transaction_id);
+create index if not exists idx_inventory_tx_sequence on inventory_transactions(inventory_transaction_group_id, transaction_sequence);
+create index idx_inventory_transactions_financial_year on inventory_transactions(financial_year_id);
+create index if not exists idx_inventory_transactions_replay_order on inventory_transactions (client_id, branch_id, variant_id, inventory_transaction_group_id, transaction_sequence, created_at, id);
+create index if not exists idx_inventory_transaction_types_active_code on inventory_transaction_types (transaction_code, is_active);
 CREATE UNIQUE INDEX permission_definitions_module_action_key ON public.permission_definitions USING btree (module_code, action_code)
 CREATE UNIQUE INDEX permission_definitions_module_code_action_code_key ON public.permission_definitions USING btree (module_code, action_code)
 CREATE UNIQUE INDEX permission_definitions_pkey ON public.permission_definitions USING btree (id)
@@ -376,11 +382,7 @@ CREATE UNIQUE INDEX unique_user_group ON public.user_groups USING btree (user_id
 CREATE UNIQUE INDEX user_groups_user_group ON public.user_groups USING btree (user_id, group_id)
 CREATE UNIQUE INDEX users_auth_user_id_unique ON public.users USING btree (auth_user_id)
 CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)
-create index if not exists idx_inventory_tx_group on inventory_transactions(inventory_transaction_group_id);
-create index if not exists idx_inventory_tx_parent on inventory_transactions(parent_transaction_id);
-create index if not exists idx_inventory_tx_sequence on inventory_transactions(inventory_transaction_group_id, transaction_sequence);
 create unique index ux_tenant_inventory_policy on public.tenant_inventory_policies (client_id, branch_id);
-create index idx_inventory_transactions_financial_year on inventory_transactions(financial_year_id);
 
 alter table public.Profiles add constraint profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
 alter table public.Profiles add constraint profiles_pkey PRIMARY KEY (id);
@@ -818,12 +820,22 @@ begin
     -- 3. VALIDATE TRANSACTION TYPE
     ----------------------------------------------------
 
-    perform validate_inventory_transaction_type(
-        p_transaction_type
-    );
+    select *
+		into v_transaction_type
+		from inventory_transaction_types
+		where transaction_code = p_transaction_type
+		  and is_active = true;
+
+		if not found then
+		
+			raise exception
+			'INVALID_TRANSACTION_TYPE: %',
+			p_transaction_type;
+			
+		end if;
 
 	----------------------------------------------------
-	-- 3.5 VALIDATE FINANCIAL YEAR
+	-- 4 VALIDATE FINANCIAL YEAR
 	----------------------------------------------------
 
 	if p_financial_year_id is null then
@@ -862,15 +874,27 @@ begin
 
 	end if;
 
-    ----------------------------------------------------
-    -- 4. LOAD TAXONOMY
-    ----------------------------------------------------
+----------------------------------------------------
+-- 4.5 VALIDATE ACTOR TENANT OWNERSHIP
+----------------------------------------------------
 
-    select *
-    into v_transaction_type
-    from inventory_transaction_types
-    where transaction_code = p_transaction_type
-      and is_active = true;
+	if p_created_by is not null then
+
+		if not exists (
+
+			select 1
+			from users u
+			where u.id = p_created_by
+			  and u.client_id = p_client_id
+
+		) then
+
+			raise exception
+			'INVALID_CREATED_BY_USER';
+
+		end if;
+
+	end if;
 
 	----------------------------------------------------
 	-- 5. OPENING BALANCE GOVERNANCE
@@ -1346,19 +1370,21 @@ begin
         -- 4. UPSERT SNAPSHOT (RECONSTRUCTION)
         ------------------------------------------------
         insert into inventory_snapshots (
-            client_id,
-            branch_id,
-            variant_id,
-            quantity,
-            updated_at
-        )
-        values (
-            rec.client_id,
-            rec.branch_id,
-            rec.variant_id,
-            v_delta,
-            now()
-        )
+			client_id,
+			branch_id,
+			variant_id,
+			quantity,
+			created_at,
+			updated_at
+		)
+		values (
+			rec.client_id,
+			rec.branch_id,
+			rec.variant_id,
+			v_delta,
+			now(),
+			now()
+		)
         on conflict (client_id, branch_id, variant_id)
         do update set
             quantity = inventory_snapshots.quantity + excluded.quantity,
@@ -1604,7 +1630,7 @@ end;
 $$;
 
 create or replace function reverse_inventory_transaction(
-
+	p_client_id uuid,
     p_transaction_id uuid,
     p_reversed_by uuid,
     p_reason text default null
@@ -1650,10 +1676,11 @@ begin
     ----------------------------------------------------
 
     select *
-    into v_original_transaction
-    from inventory_transactions
-    where id = p_transaction_id;
-
+	into v_original_transaction
+	from inventory_transactions
+	where id = p_transaction_id
+	  and client_id = p_client_id;
+	  
     if not found then
 
         raise exception
@@ -1678,7 +1705,35 @@ begin
         'ORIGINAL_TRANSACTION_TYPE_INVALID';
 
     end if;
+	
+    ----------------------------------------------------
+    -- 2.5. CHECK FINANCIAL YEAR EXISTS IN LOADED TRANSACTION
+    ----------------------------------------------------
 
+	if v_original_transaction.financial_year_id is null then
+
+		raise exception
+		'ORIGINAL_TRANSACTION_FINANCIAL_YEAR_MISSING';
+
+	end if;
+	
+	----------------------------------------------------
+-- 2.6 VALIDATE REVERSAL ACTOR
+----------------------------------------------------
+
+	if not exists (
+
+		select 1
+		from users u
+		where u.id = p_reversed_by
+		  and u.client_id = p_client_id
+
+	) then
+
+		raise exception
+		'INVALID_REVERSAL_USER';
+
+	end if;
     ----------------------------------------------------
     -- 3. PREVENT REVERSAL OF REVERSALS
     ----------------------------------------------------
@@ -1846,6 +1901,7 @@ $$;
 -- =====================================================
 
 comment on function reverse_inventory_transaction(
+    uuid,
     uuid,
     uuid,
     text
@@ -2148,3 +2204,141 @@ comment on function validate_inventory_reversal(
 )
 is
 'Validates reversal legality and lineage correctness.';
+
+create or replace function create_opening_balance(
+
+    p_client_id uuid,
+    p_branch_id uuid,
+    p_variant_id uuid,
+
+    p_financial_year_id uuid,
+
+    p_quantity numeric,
+
+    p_created_by uuid,
+
+    p_unit_cost numeric default null,
+
+    p_remarks text default null,
+
+    p_metadata jsonb default '{}'::jsonb
+
+)
+returns uuid
+
+language plpgsql
+
+security definer
+
+as $$
+
+declare
+------------------------------------------------
+-- GOVERNED OPENING BALANCE WORKFLOW
+------------------------------------------------
+--
+-- PURPOSE
+-- -------
+-- Workflow-layer orchestration RPC for governed
+-- opening balance initialization.
+--
+-- Delegates immutable ledger mutation to:
+--
+-- create_inventory_transaction()
+--
+-- This RPC exists to separate:
+--
+-- - business initialization governance
+-- from
+-- - primitive immutable mutation mechanics
+--
+------------------------------------------------
+    v_transaction_id uuid;
+
+begin
+
+    ------------------------------------------------
+    -- GOVERNANCE VALIDATION
+    ------------------------------------------------
+
+    if p_financial_year_id is null then
+        raise exception 'FINANCIAL_YEAR_REQUIRED';
+    end if;
+
+    ------------------------------------------------
+    -- OPENING BALANCE UNIQUENESS
+    ------------------------------------------------
+
+    if exists (
+
+        select 1
+        from inventory_transactions it
+        where
+            it.client_id = p_client_id
+            and it.branch_id = p_branch_id
+            and it.variant_id = p_variant_id
+            and it.financial_year_id = p_financial_year_id
+            and it.transaction_type = 'opening_balance'
+
+    ) then
+
+        raise exception
+            'OPENING_BALANCE_ALREADY_EXISTS_FOR_FINANCIAL_YEAR';
+
+    end if;
+
+    ------------------------------------------------
+    -- WORKFLOW METADATA ENRICHMENT
+    ------------------------------------------------
+
+    p_metadata := coalesce(
+        p_metadata,
+        '{}'::jsonb
+    ) || jsonb_build_object(
+
+        'workflow_type',
+        'opening_balance',
+
+        'initialization_event',
+        true
+
+    );
+
+    ------------------------------------------------
+    -- DELEGATE TO PRIMITIVE ENGINE
+    ------------------------------------------------
+
+    select create_inventory_transaction(
+
+        p_client_id := p_client_id,
+
+        p_branch_id := p_branch_id,
+
+        p_variant_id := p_variant_id,
+
+        p_transaction_type := 'opening_balance',
+
+        p_quantity := p_quantity,
+
+        p_financial_year_id := p_financial_year_id,
+
+        p_unit_cost := p_unit_cost,
+
+        p_created_by := p_created_by,
+
+        p_remarks := coalesce(
+            p_remarks,
+            'Opening balance initialization'
+        ),
+
+        p_metadata := p_metadata
+
+    )
+
+    into v_transaction_id;
+
+    return v_transaction_id;
+
+end;
+
+$$;
