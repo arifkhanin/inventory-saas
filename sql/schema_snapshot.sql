@@ -2217,92 +2217,53 @@ create or replace function create_opening_balance(
 
     p_created_by uuid,
 
-    p_unit_cost numeric default null,
+    p_unit_cost numeric default 0,
 
     p_remarks text default null,
 
     p_metadata jsonb default '{}'::jsonb
 
 )
-returns uuid
-
+returns jsonb
 language plpgsql
-
-security definer
-
 as $$
-
 declare
-------------------------------------------------
--- GOVERNED OPENING BALANCE WORKFLOW
-------------------------------------------------
---
--- PURPOSE
--- -------
--- Workflow-layer orchestration RPC for governed
--- opening balance initialization.
---
--- Delegates immutable ledger mutation to:
---
--- create_inventory_transaction()
---
--- This RPC exists to separate:
---
--- - business initialization governance
--- from
--- - primitive immutable mutation mechanics
---
-------------------------------------------------
-    v_transaction_id uuid;
+
+    v_existing_count integer;
+
+    v_result jsonb;
 
 begin
 
     ------------------------------------------------
-    -- GOVERNANCE VALIDATION
+    -- FINANCIAL YEAR REQUIRED
     ------------------------------------------------
 
     if p_financial_year_id is null then
+
         raise exception 'FINANCIAL_YEAR_REQUIRED';
+
     end if;
 
     ------------------------------------------------
     -- OPENING BALANCE UNIQUENESS
     ------------------------------------------------
 
-    if exists (
+    select count(*)
+    into v_existing_count
+    from inventory_transactions it
+    where it.client_id = p_client_id
+    and it.branch_id = p_branch_id
+    and it.variant_id = p_variant_id
+    and it.financial_year_id = p_financial_year_id
+    and it.transaction_type = 'opening_balance';
 
-        select 1
-        from inventory_transactions it
-        where
-            it.client_id = p_client_id
-            and it.branch_id = p_branch_id
-            and it.variant_id = p_variant_id
-            and it.financial_year_id = p_financial_year_id
-            and it.transaction_type = 'opening_balance'
-
-    ) then
+    if v_existing_count > 0 then
 
         raise exception
             'OPENING_BALANCE_ALREADY_EXISTS_FOR_FINANCIAL_YEAR';
 
     end if;
-
-    ------------------------------------------------
-    -- WORKFLOW METADATA ENRICHMENT
-    ------------------------------------------------
-
-    p_metadata := coalesce(
-        p_metadata,
-        '{}'::jsonb
-    ) || jsonb_build_object(
-
-        'workflow_type',
-        'opening_balance',
-
-        'initialization_event',
-        true
-
-    );
 
     ------------------------------------------------
     -- DELEGATE TO PRIMITIVE ENGINE
@@ -2322,23 +2283,48 @@ begin
 
         p_financial_year_id := p_financial_year_id,
 
-        p_unit_cost := p_unit_cost,
-
         p_created_by := p_created_by,
 
-        p_remarks := coalesce(
-            p_remarks,
-            'Opening balance initialization'
-        ),
+        p_unit_cost := p_unit_cost,
 
-        p_metadata := p_metadata
+        p_remarks := p_remarks,
 
+        p_metadata :=
+
+        coalesce(p_metadata, '{}'::jsonb)
+
+        ||
+
+        jsonb_build_object(
+
+            'workflow', 'opening_balance',
+
+            'governance_type', 'initialization',
+
+            'financial_year_id',
+            p_financial_year_id,
+
+            'opening_balance', true
+
+        )
     )
+    into v_result;
 
-    into v_transaction_id;
+    ------------------------------------------------
+    -- RETURN STRUCTURED RESULT
+    ------------------------------------------------
 
-    return v_transaction_id;
+    return jsonb_build_object(
+
+        'success', true,
+
+        'workflow', 'opening_balance',
+
+        'financial_year_id', p_financial_year_id,
+
+        'result', v_result
+
+    );
 
 end;
-
 $$;
